@@ -8,10 +8,14 @@ function App() {
   const [displayedResult, setDisplayedResult] = useState('');
   const [loading, setLoading] = useState(false);
   const [dots, setDots] = useState('');
+  const [mode, setMode] = useState('truth'); // 'truth' or 'silhouette'
+  const [silhouetteImage, setSilhouetteImage] = useState(null);
+  const [tapPoint, setTapPoint] = useState(null);
   
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
+  const imageRef = useRef(null);
 
   // ローディングドットアニメーション
   useEffect(() => {
@@ -71,6 +75,8 @@ function App() {
       setIsStreaming(true);
       setCapturedImage(null);
       setResult(null);
+      setSilhouetteImage(null);
+      setTapPoint(null);
     } catch (e) {
       console.error('Camera access denied:', e);
     }
@@ -104,7 +110,7 @@ function App() {
     const response = await fetch('/api/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ base64Image }),
+      body: JSON.stringify({ base64Image, mode }),
     });
 
     if (!response.ok) {
@@ -115,7 +121,7 @@ function App() {
     return data.result;
   };
 
-  const captureAndAnalyze = async () => {
+  const captureImage = async () => {
     if (!videoRef.current) return;
 
     const canvas = canvasRef.current;
@@ -128,23 +134,121 @@ function App() {
     ctx.drawImage(video, 0, 0);
     
     const rawImageData = canvas.toDataURL('image/jpeg', 0.8);
-    const base64Image = rawImageData.replace(/^data:image\/\w+;base64,/, '');
     
     applyFilters(canvas, ctx);
     const filteredImageData = canvas.toDataURL('image/jpeg', 0.8);
     
     setCapturedImage(filteredImageData);
-    setLoading(true);
+    
+    if (mode === 'truth') {
+      // Truth モード：従来の処理
+      const base64Image = rawImageData.replace(/^data:image\/\w+;base64,/, '');
+      setLoading(true);
+      
+      try {
+        const resultText = await analyzeImage(base64Image);
+        setResult(resultText);
+      } catch (e) {
+        console.error('API error:', e);
+        setResult('OBEY');
+      }
+      
+      setLoading(false);
+    }
+    // Silhouette モードはタップを待つ
+  };
 
+  const handleImageTap = async (e) => {
+    if (mode !== 'silhouette' || !capturedImage || loading) return;
+    
+    const rect = e.target.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
+    
+    setTapPoint({ x, y });
+    setLoading(true);
+    
     try {
-      const resultText = await analyzeImage(base64Image);
-      setResult(resultText);
+      // エッジ検出とシルエット生成
+      await generateSilhouette(x, y);
     } catch (e) {
-      console.error('API error:', e);
-      setResult('OBEY');
+      console.error('Silhouette error:', e);
     }
     
     setLoading(false);
+  };
+
+  const generateSilhouette = async (tapX, tapY) => {
+    const canvas = document.createElement('canvas');
+    const img = imageRef.current;
+    
+    canvas.width = img.naturalWidth || img.width;
+    canvas.height = img.naturalHeight || img.height;
+    
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imageData.data;
+    
+    // タップ位置のピクセル
+    const tapPixelX = Math.floor(tapX * canvas.width);
+    const tapPixelY = Math.floor(tapY * canvas.height);
+    
+    // タップ位置の色を取得
+    const tapIndex = (tapPixelY * canvas.width + tapPixelX) * 4;
+    const targetR = data[tapIndex];
+    const targetG = data[tapIndex + 1];
+    const targetB = data[tapIndex + 2];
+    
+    // Flood fill アルゴリズムで類似色を検出
+    const tolerance = 50; // 色の許容差
+    const visited = new Set();
+    const toFill = [];
+    const queue = [[tapPixelX, tapPixelY]];
+    
+    const getIndex = (x, y) => (y * canvas.width + x) * 4;
+    
+    const isSimilar = (index) => {
+      const r = data[index];
+      const g = data[index + 1];
+      const b = data[index + 2];
+      return Math.abs(r - targetR) < tolerance &&
+             Math.abs(g - targetG) < tolerance &&
+             Math.abs(b - targetB) < tolerance;
+    };
+    
+    while (queue.length > 0) {
+      const [px, py] = queue.shift();
+      const key = `${px},${py}`;
+      
+      if (visited.has(key)) continue;
+      if (px < 0 || px >= canvas.width || py < 0 || py >= canvas.height) continue;
+      
+      const index = getIndex(px, py);
+      if (!isSimilar(index)) continue;
+      
+      visited.add(key);
+      toFill.push(index);
+      
+      // 4方向に拡張
+      queue.push([px + 1, py]);
+      queue.push([px - 1, py]);
+      queue.push([px, py + 1]);
+      queue.push([px, py - 1]);
+    }
+    
+    // 蛍光色で塗りつぶし（蛍光グリーン）
+    const neonColor = { r: 0, g: 255, b: 100 };
+    
+    for (const index of toFill) {
+      data[index] = neonColor.r;
+      data[index + 1] = neonColor.g;
+      data[index + 2] = neonColor.b;
+    }
+    
+    ctx.putImageData(imageData, 0, 0);
+    setSilhouetteImage(canvas.toDataURL('image/png'));
   };
 
   const saveImage = async () => {
@@ -180,6 +284,12 @@ function App() {
   const reset = () => {
     setCapturedImage(null);
     setResult(null);
+    setSilhouetteImage(null);
+    setTapPoint(null);
+  };
+
+  const cycleMode = () => {
+    setMode(mode === 'truth' ? 'silhouette' : 'truth');
   };
 
   return (
@@ -257,17 +367,42 @@ function App() {
             height: '100%',
           }}>
             <img
-              src={capturedImage}
+              ref={imageRef}
+              src={silhouetteImage || capturedImage}
               alt="Captured"
+              onClick={handleImageTap}
               style={{
                 width: '100%',
                 height: '100%',
                 objectFit: 'cover',
+                cursor: mode === 'silhouette' ? 'crosshair' : 'default',
               }}
             />
             
-            {/* Result overlay */}
-            {result && (
+            {/* Tap indicator */}
+            {mode === 'silhouette' && !silhouetteImage && !loading && (
+              <div style={{
+                position: 'absolute',
+                inset: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                pointerEvents: 'none',
+              }}>
+                <div style={{
+                  fontFamily: 'monospace',
+                  fontSize: 14,
+                  color: 'white',
+                  backgroundColor: 'rgba(0,0,0,0.5)',
+                  padding: '8px 16px',
+                }}>
+                  TAP TO SELECT OBJECT
+                </div>
+              </div>
+            )}
+            
+            {/* Result overlay (truth mode) */}
+            {mode === 'truth' && result && (
               <div style={{
                 position: 'absolute',
                 inset: 0,
@@ -313,7 +448,7 @@ function App() {
             color: 'white',
             letterSpacing: '0.05em',
           }}>
-            REVEALING TRUTH{dots}
+            {mode === 'truth' ? `REVEALING TRUTH${dots}` : `EXTRACTING${dots}`}
           </div>
         </div>
       )}
@@ -321,10 +456,31 @@ function App() {
       {/* Hidden canvas */}
       <canvas ref={canvasRef} style={{ display: 'none' }} />
 
+      {/* Mode button */}
+      <button
+        onClick={cycleMode}
+        style={{
+          position: 'absolute',
+          top: 16,
+          left: 16,
+          padding: '8px 16px',
+          backgroundColor: 'rgba(255,255,255,0.0)',
+          color: 'white',
+          fontFamily: 'monospace',
+          fontSize: 12,
+          border: 'none',
+          cursor: 'pointer',
+          zIndex: 10,
+          mixBlendMode: 'difference',
+        }}
+      >
+        {mode.toUpperCase()}
+      </button>
+
       {/* Capture button */}
       {isStreaming && !capturedImage && (
         <button
-          onClick={captureAndAnalyze}
+          onClick={captureImage}
           style={{
             position: 'absolute',
             bottom: 32,
@@ -343,7 +499,7 @@ function App() {
       )}
 
       {/* Bottom buttons */}
-      {capturedImage && !loading && (
+      {capturedImage && !loading && (mode === 'truth' ? result : silhouetteImage) && (
         <div style={{
           position: 'absolute',
           bottom: 32,
