@@ -202,7 +202,7 @@ function App() {
     const targetB = data[tapIndex + 2];
     
     // Flood fill アルゴリズムで類似色を検出
-    const tolerance = 50; // 色の許容差
+    const tolerance = 80; // 色の許容差
     const visited = new Set();
     const toFill = [];
     const queue = [[tapPixelX, tapPixelY]];
