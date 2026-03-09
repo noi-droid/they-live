@@ -305,23 +305,22 @@ export default function FingerDrawApp() {
 
     const fs = fontSizeRef.current;
     const trk = trackingRef.current;
-    const lineH = fs * 1.1;
+    // Use cap-height ratio (~0.72) for tighter vertical fit
+    const bodyH = fs * 0.75;
 
     for (let li = 0; li < lines.length; li++) {
       const line = lines[li];
       const lineW = measureLineWidth(line, fs, trk);
-      const bodyW = Math.max(lineW + fs * 0.3, fs);
-      const bodyH = lineH;
+      const bodyW = Math.max(lineW, fs * 0.5);
 
       const x = Math.max(bodyW / 2, Math.min(cw - bodyW / 2, cx));
-      const y = -bodyH - li * (lineH + 10) - Math.random() * 40;
+      const y = -bodyH - li * (bodyH + 8) - Math.random() * 40;
 
       const body = Bodies.rectangle(x, y, bodyW, bodyH, {
-        restitution: 0.3,
-        friction: 0.4,
-        frictionAir: 0.002,
+        restitution: 0.25,
+        friction: 0.6,
+        frictionAir: 0.003,
         angle: (Math.random() - 0.5) * 0.15,
-        chamfer: { radius: Math.min(bodyW, bodyH) * 0.05 },
       });
 
       Body.setVelocity(body, {
@@ -490,38 +489,40 @@ export default function FingerDrawApp() {
           value={inputText}
           onChange={e => setInputText(e.target.value)}
           placeholder="Enter text (one line per body)..."
-          rows={inputText.split('\n').length || 1}
+          rows={Math.min(inputText.split('\n').length, 3) || 1}
         />
-        <div className="fd-sliders">
-          <div className="fd-size-control">
-            <span className="fd-size-label">{fontSize}px</span>
-            <input
-              type="range"
-              className="fd-size-slider"
-              min="24"
-              max="400"
-              value={fontSize}
-              onChange={e => setFontSize(Number(e.target.value))}
-            />
+        <div className="fd-toolbar">
+          <div className="fd-sliders">
+            <div className="fd-size-control">
+              <span className="fd-size-label">{fontSize}px</span>
+              <input
+                type="range"
+                className="fd-size-slider"
+                min="24"
+                max="400"
+                value={fontSize}
+                onChange={e => setFontSize(Number(e.target.value))}
+              />
+            </div>
+            <div className="fd-size-control">
+              <span className="fd-size-label">{tracking > 0 ? '+' : ''}{tracking}</span>
+              <input
+                type="range"
+                className="fd-size-slider"
+                min="-20"
+                max="100"
+                value={tracking}
+                onChange={e => setTracking(Number(e.target.value))}
+              />
+            </div>
           </div>
-          <div className="fd-size-control">
-            <span className="fd-size-label">{tracking > 0 ? '+' : ''}{tracking}</span>
-            <input
-              type="range"
-              className="fd-size-slider"
-              min="-20"
-              max="100"
-              value={tracking}
-              onChange={e => setTracking(Number(e.target.value))}
-            />
-          </div>
+          <button onClick={toggleCamera} className="fd-btn">
+            &#x21C6;
+          </button>
+          <button onClick={clearAll} className="fd-btn">
+            CLEAR
+          </button>
         </div>
-        <button onClick={toggleCamera} className="fd-btn">
-          &#x21C6;
-        </button>
-        <button onClick={clearAll} className="fd-btn">
-          CLEAR
-        </button>
       </div>
     </div>
   );

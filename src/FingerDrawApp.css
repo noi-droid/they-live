@@ -91,20 +91,21 @@
   to { transform: rotate(360deg); }
 }
 
-/* Controls */
+/* Controls — two-row layout for mobile */
 .fd-controls {
   display: flex;
-  gap: 8px;
-  padding: 10px 12px;
-  padding-bottom: max(10px, env(safe-area-inset-bottom));
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  padding-bottom: max(8px, env(safe-area-inset-bottom));
   background: #000;
-  align-items: center;
 }
 
+/* Row 1: textarea */
 .fd-text-input {
-  flex: 1;
-  min-width: 0;
-  padding: 8px 12px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
   background: rgba(255, 255, 255, 0.08);
   color: #C8FF00;
   border: 1px solid rgba(255, 255, 255, 0.15);
@@ -114,7 +115,7 @@
   outline: none;
   resize: none;
   line-height: 1.4;
-  max-height: 80px;
+  max-height: 72px;
   overflow-y: auto;
 }
 
@@ -126,35 +127,43 @@
   color: rgba(255, 255, 255, 0.3);
 }
 
+/* Row 2: sliders + buttons */
+.fd-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 /* Sliders wrapper */
 .fd-sliders {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  flex-shrink: 0;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
 }
 
 /* Size / tracking control */
 .fd-size-control {
   display: flex;
   align-items: center;
-  gap: 6px;
-  flex-shrink: 0;
+  gap: 4px;
 }
 
 .fd-size-label {
   color: rgba(255, 255, 255, 0.5);
   font-size: 10px;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.04em;
   white-space: nowrap;
-  min-width: 38px;
+  min-width: 34px;
   text-align: right;
 }
 
 .fd-size-slider {
   -webkit-appearance: none;
   appearance: none;
-  width: 80px;
+  flex: 1;
+  min-width: 0;
   height: 2px;
   background: rgba(255, 255, 255, 0.15);
   outline: none;
@@ -164,16 +173,16 @@
 .fd-size-slider::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
   background: #C8FF00;
   cursor: pointer;
 }
 
 .fd-size-slider::-moz-range-thumb {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
   background: #C8FF00;
   border: none;
@@ -181,7 +190,7 @@
 }
 
 .fd-btn {
-  padding: 10px 16px;
+  padding: 8px 12px;
   background: rgba(255, 255, 255, 0.08);
   color: rgba(255, 255, 255, 0.7);
   border: 1px solid rgba(255, 255, 255, 0.15);
@@ -191,6 +200,7 @@
   cursor: pointer;
   transition: background 0.2s, color 0.2s;
   flex-shrink: 0;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .fd-btn:active {
