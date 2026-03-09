@@ -44,8 +44,10 @@ export default function FingerDrawApp() {
   const [modelLoading, setModelLoading] = useState(true);
   const [inputText, setInputText] = useState('THEY LIVE');
   const [fontSize, setFontSize] = useState(48);
+  const [facingMode, setFacingMode] = useState('user');
   const inputTextRef = useRef('THEY LIVE');
   const fontSizeRef = useRef(48);
+  const facingModeRef = useRef('user');
 
   useEffect(() => {
     inputTextRef.current = inputText;
@@ -54,6 +56,10 @@ export default function FingerDrawApp() {
   useEffect(() => {
     fontSizeRef.current = fontSize;
   }, [fontSize]);
+
+  useEffect(() => {
+    facingModeRef.current = facingMode;
+  }, [facingMode]);
 
   // Ensure OTR Grotesk is loaded for canvas rendering
   useEffect(() => {
@@ -95,8 +101,8 @@ export default function FingerDrawApp() {
     } else {
       dh = ch; dw = ch * vAspect; ox = (cw - dw) / 2; oy = 0;
     }
-    const mirroredX = 1 - lmX;
-    return { x: mirroredX * dw + ox, y: lmY * dh + oy };
+    const adjustedX = facingModeRef.current === 'user' ? 1 - lmX : lmX;
+    return { x: adjustedX * dw + ox, y: lmY * dh + oy };
   }, []);
 
   // Init PoseLandmarker
@@ -130,21 +136,31 @@ export default function FingerDrawApp() {
     };
   }, []);
 
-  // Start camera
+  // Start camera (restarts when facingMode changes)
   useEffect(() => {
+    let cancelled = false;
     (async () => {
+      // Stop previous stream
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(t => t.stop());
+        streamRef.current = null;
+      }
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+          video: { facingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
         });
+        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
         streamRef.current = stream;
         if (videoRef.current) videoRef.current.srcObject = stream;
       } catch (e) {
         console.error('Camera error:', e);
       }
     })();
-    return () => streamRef.current?.getTracks().forEach(t => t.stop());
-  }, []);
+    return () => {
+      cancelled = true;
+      streamRef.current?.getTracks().forEach(t => t.stop());
+    };
+  }, [facingMode]);
 
   // Init matter.js engine, walls, body collision circles
   useEffect(() => {
@@ -388,6 +404,12 @@ export default function FingerDrawApp() {
     };
   }, [modelLoading, updateBodyFromPose, hideBody]);
 
+  // Toggle camera facing mode
+  const toggleCamera = useCallback(() => {
+    setFacingMode(prev => prev === 'user' ? 'environment' : 'user');
+    prevLandmarksRef.current = null;
+  }, []);
+
   // Clear all characters
   const clearAll = useCallback(() => {
     if (engineRef.current) {
@@ -401,7 +423,7 @@ export default function FingerDrawApp() {
   return (
     <div className="finger-draw-app">
       <div className="fd-camera-wrap" ref={cameraWrapRef} onClick={handleTap}>
-        <video ref={videoRef} autoPlay playsInline muted className="fd-video" />
+        <video ref={videoRef} autoPlay playsInline muted className={`fd-video${facingMode === 'user' ? ' fd-video-mirrored' : ''}`} />
         <div className="fd-grain" ref={grainRef} />
         <canvas ref={charCanvasRef} className="fd-char-canvas" />
 
@@ -432,6 +454,9 @@ export default function FingerDrawApp() {
             onChange={e => setFontSize(Number(e.target.value))}
           />
         </div>
+        <button onClick={toggleCamera} className="fd-btn">
+          &#x21C6;
+        </button>
         <button onClick={clearAll} className="fd-btn">
           CLEAR
         </button>

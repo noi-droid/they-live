@@ -26,8 +26,11 @@
   width: 100%;
   height: 100%;
   object-fit: cover;
-  transform: scaleX(-1);
   filter: grayscale(100%) contrast(1.3) brightness(0.85);
+}
+
+.fd-video-mirrored {
+  transform: scaleX(-1);
 }
 
 /* Film grain overlay */
