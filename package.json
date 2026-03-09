@@ -11,7 +11,9 @@
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
+    "@mediapipe/tasks-vision": "^0.10.32",
     "html2canvas": "^1.4.1",
+    "matter-js": "^0.20.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },

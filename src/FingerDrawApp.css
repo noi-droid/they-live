@@ -1,0 +1,184 @@
+@font-face {
+  font-family: 'OTR Grotesk';
+  src: url('/fonts/OTRGrotesk-Regular.otf') format('opentype');
+  font-weight: 400;
+  font-style: normal;
+}
+
+.finger-draw-app {
+  position: fixed;
+  inset: 0;
+  background: #000;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font-family: 'Courier New', monospace;
+}
+
+.fd-camera-wrap {
+  position: relative;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* Monochrome analog video */
+.fd-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scaleX(-1);
+  filter: grayscale(100%) contrast(1.3) brightness(0.85);
+}
+
+/* Film grain overlay */
+.fd-grain {
+  position: absolute;
+  inset: -10%;
+  width: 120%;
+  height: 120%;
+  pointer-events: none;
+  z-index: 3;
+  background-repeat: repeat;
+  animation: fd-grain-flicker 0.15s steps(1) infinite;
+}
+
+@keyframes fd-grain-flicker {
+  0%  { transform: translate(0, 0); }
+  20% { transform: translate(-2%, -3%); }
+  40% { transform: translate(3%, 1%); }
+  60% { transform: translate(-1%, 4%); }
+  80% { transform: translate(4%, -2%); }
+}
+
+.fd-char-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 4;
+}
+
+/* Loading overlay */
+.fd-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  background: rgba(0, 0, 0, 0.85);
+  color: #C8FF00;
+  font-size: 13px;
+  letter-spacing: 0.15em;
+  z-index: 20;
+}
+
+.fd-spinner {
+  width: 36px;
+  height: 36px;
+  border: 3px solid rgba(200, 255, 0, 0.2);
+  border-top-color: #C8FF00;
+  border-radius: 50%;
+  animation: fd-spin 0.8s linear infinite;
+}
+
+@keyframes fd-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Controls */
+.fd-controls {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+  padding-bottom: max(10px, env(safe-area-inset-bottom));
+  background: #000;
+  align-items: center;
+}
+
+.fd-text-input {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #C8FF00;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  font-family: 'OTR Grotesk', sans-serif;
+  font-size: 16px;
+  letter-spacing: 0.06em;
+  outline: none;
+}
+
+.fd-text-input:focus {
+  border-color: rgba(200, 255, 0, 0.3);
+}
+
+.fd-text-input::placeholder {
+  color: rgba(255, 255, 255, 0.3);
+}
+
+/* Font size control */
+.fd-size-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.fd-size-label {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  min-width: 38px;
+  text-align: right;
+}
+
+.fd-size-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 80px;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.15);
+  outline: none;
+  border-radius: 1px;
+}
+
+.fd-size-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #C8FF00;
+  cursor: pointer;
+}
+
+.fd-size-slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #C8FF00;
+  border: none;
+  cursor: pointer;
+}
+
+.fd-btn {
+  padding: 10px 16px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+  flex-shrink: 0;
+}
+
+.fd-btn:active {
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}

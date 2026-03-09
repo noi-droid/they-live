@@ -45,7 +45,7 @@ Be creative but stay in the style of the movie. Keep responses SHORT - 1-3 words
       },
     };
 
-    const modelsToTry = ['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-pro-vision'];
+    const modelsToTry = ['gemini-1.5-pro', 'gemini-1.5-flash-latest', 'gemini-pro-vision'];
     
     let resultText = '';
     let success = false;
