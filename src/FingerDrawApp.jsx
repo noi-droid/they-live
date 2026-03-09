@@ -25,9 +25,24 @@ const MAX_LINES = 50;
 const CHAR_COLOR = '#C8FF00';
 
 // Camera-based pinch detection thresholds (normalised landmark distance)
-const PINCH_GRAB_DIST = 0.06;    // thumb-index distance to start grab
-const PINCH_RELEASE_DIST = 0.09; // hysteresis — must open wider to release
-const PINCH_HIT_RADIUS = 40;     // CSS-px radius for body hit-test around pinch point
+const PINCH_GRAB_DIST = 0.07;    // thumb-index distance to start grab
+const PINCH_RELEASE_DIST = 0.15; // hysteresis — must open wider to release
+const PINCH_HIT_RADIUS = 60;     // CSS-px radius for body hit-test around pinch point
+const PINCH_FOLLOW = 0.45;       // lerp factor — 0 = frozen, 1 = instant snap
+
+// Build default text from current Tokyo date/time
+function buildDefaultText() {
+  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
+  const h = now.getHours();
+  const h12 = h % 12 || 12;
+  const min = String(now.getMinutes()).padStart(2, '0');
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  return `${days[now.getDay()]}\n${months[now.getMonth()]} ${now.getDate()}\n${now.getFullYear()}\n${h12}:${min} ${ampm}\nTOKYO`;
+}
+
+const DEFAULT_TEXT = buildDefaultText();
 
 let nextLineId = 0;
 
@@ -60,12 +75,12 @@ export default function FingerDrawApp() {
   const videoFileUrlRef = useRef(null);
 
   const [modelLoading, setModelLoading] = useState(true);
-  const [inputText, setInputText] = useState('THEY\nLIVE');
+  const [inputText, setInputText] = useState(DEFAULT_TEXT);
   const [fontSize, setFontSize] = useState(48);
   const [tracking, setTracking] = useState(0);
   const [facingMode, setFacingMode] = useState('user');
   const [sourceMode, setSourceMode] = useState('camera'); // 'camera' | 'video'
-  const inputTextRef = useRef('THEY\nLIVE');
+  const inputTextRef = useRef(DEFAULT_TEXT);
   const fontSizeRef = useRef(48);
   const trackingRef = useRef(0);
   const facingModeRef = useRef('user');
@@ -483,12 +498,15 @@ export default function FingerDrawApp() {
         state.prevPos = null;
         state.vel = { x: 0, y: 0 };
       } else {
-        // Move body to follow pinch midpoint
+        // Move body smoothly toward pinch midpoint (lerp)
         if (state.entry) {
-          Body.setPosition(state.entry.body, { x: mid.x, y: mid.y });
-          if (state.prevPos) {
-            state.vel = { x: mid.x - state.prevPos.x, y: mid.y - state.prevPos.y };
-          }
+          const bx = state.entry.body.position.x;
+          const by = state.entry.body.position.y;
+          const nx = bx + (mid.x - bx) * PINCH_FOLLOW;
+          const ny = by + (mid.y - by) * PINCH_FOLLOW;
+          Body.setPosition(state.entry.body, { x: nx, y: ny });
+          // Velocity based on actual body movement (for throw)
+          state.vel = { x: nx - bx, y: ny - by };
           state.prevPos = mid;
         }
       }
