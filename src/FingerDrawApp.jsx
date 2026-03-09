@@ -23,7 +23,11 @@ const HEAD_CIRCLES_COUNT = 9;
 const HEAD_CIRCLE_R = 22;
 const MAX_LINES = 50;
 const CHAR_COLOR = '#C8FF00';
-const TAP_THRESHOLD = 10; // px — movement below this counts as tap
+
+// Camera-based pinch detection thresholds (normalised landmark distance)
+const PINCH_GRAB_DIST = 0.06;    // thumb-index distance to start grab
+const PINCH_RELEASE_DIST = 0.09; // hysteresis — must open wider to release
+const PINCH_HIT_RADIUS = 40;     // CSS-px radius for body hit-test around pinch point
 
 let nextLineId = 0;
 
@@ -45,12 +49,12 @@ export default function FingerDrawApp() {
   const measureCtxRef = useRef(null);
   const dropIndexRef = useRef(0);
 
-  // Pointer / grab tracking
-  const pointersRef = useRef(new Map());
-  const grabRef = useRef(null);
-  const tapStartRef = useRef(null);
-  const prevMidRef = useRef(null);
-  const velRef = useRef({ x: 0, y: 0 });
+  // Camera-based pinch state for each hand
+  // { grabbing: false, entry: null, prevPos: null, vel: { x: 0, y: 0 } }
+  const pinchStateRef = useRef({
+    left:  { grabbing: false, entry: null, prevPos: null, vel: { x: 0, y: 0 } },
+    right: { grabbing: false, entry: null, prevPos: null, vel: { x: 0, y: 0 } },
+  });
 
   const fileInputRef = useRef(null);
   const videoFileUrlRef = useRef(null);
@@ -390,137 +394,106 @@ export default function FingerDrawApp() {
     }
   }, [measureLineWidth]);
 
-  // ── Pointer event handlers (tap / 1-finger drag / 2-finger pinch) ──
+  // ── Camera-based pinch detection (runs inside main loop) ──
 
-  const findBodyAt = useCallback((px, py) => {
+  const findBodyNear = useCallback((px, py) => {
+    // Hit-test: try exact point first, then expand search radius
     const allBodies = lineBodiesRef.current.map(l => l.body);
     const hits = Query.point(allBodies, { x: px, y: py });
-    if (!hits.length) return null;
-    return lineBodiesRef.current.find(l => l.body === hits[0]) || null;
+    if (hits.length) return lineBodiesRef.current.find(l => l.body === hits[0]) || null;
+
+    // Expanded search: check if any body center is within PINCH_HIT_RADIUS
+    let best = null, bestDist = PINCH_HIT_RADIUS;
+    for (const line of lineBodiesRef.current) {
+      const d = Math.hypot(line.body.position.x - px, line.body.position.y - py);
+      if (d < bestDist) { bestDist = d; best = line; }
+    }
+    return best;
   }, []);
 
-  const pointerPos = useCallback((e) => {
-    const rect = cameraWrapRef.current?.getBoundingClientRect();
-    if (!rect) return { x: 0, y: 0 };
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
-  }, []);
-
-  const onPointerDown = useCallback((e) => {
-    const container = cameraWrapRef.current;
-    if (!container) return;
-    const pos = pointerPos(e);
-    container.setPointerCapture(e.pointerId);
-    pointersRef.current.set(e.pointerId, pos);
-
-    const canGrab = sourceModeRef.current === 'camera';
-
-    if (pointersRef.current.size === 1) {
-      const entry = canGrab ? findBodyAt(pos.x, pos.y) : null;
-      if (entry) {
-        // Grab body (camera mode only)
-        grabRef.current = {
-          entry,
-          offset: { x: pos.x - entry.body.position.x, y: pos.y - entry.body.position.y },
-          initAngle: null,
-          initBodyAngle: entry.body.angle,
-        };
-        Body.setStatic(entry.body, true);
-        Body.setVelocity(entry.body, { x: 0, y: 0 });
-        prevMidRef.current = pos;
-        velRef.current = { x: 0, y: 0 };
-        tapStartRef.current = null;
-      } else {
-        // Potential tap
-        grabRef.current = null;
-        tapStartRef.current = pos;
-      }
-    } else if (pointersRef.current.size === 2 && grabRef.current) {
-      // Second finger: enable rotation
-      tapStartRef.current = null;
-      const pts = Array.from(pointersRef.current.values());
-      grabRef.current.initAngle = Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x);
-      grabRef.current.initBodyAngle = grabRef.current.entry.body.angle;
-      prevMidRef.current = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
-    }
-  }, [findBodyAt, pointerPos]);
-
-  const onPointerMove = useCallback((e) => {
-    if (!pointersRef.current.has(e.pointerId)) return;
-    const pos = pointerPos(e);
-    pointersRef.current.set(e.pointerId, pos);
-
-    // Cancel tap if moved too far
-    if (tapStartRef.current) {
-      const dx = pos.x - tapStartRef.current.x;
-      const dy = pos.y - tapStartRef.current.y;
-      if (Math.hypot(dx, dy) > TAP_THRESHOLD) tapStartRef.current = null;
-    }
-
-    const grab = grabRef.current;
-    if (!grab) return;
-    const pointers = pointersRef.current;
-
-    if (pointers.size === 1) {
-      // Single finger drag
-      const nx = pos.x - grab.offset.x;
-      const ny = pos.y - grab.offset.y;
-      Body.setPosition(grab.entry.body, { x: nx, y: ny });
-      if (prevMidRef.current) {
-        velRef.current = { x: pos.x - prevMidRef.current.x, y: pos.y - prevMidRef.current.y };
-      }
-      prevMidRef.current = pos;
-    } else if (pointers.size === 2) {
-      // Two-finger: rotate + translate
-      const pts = Array.from(pointers.values());
-      const mid = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
-      const angle = Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x);
-
-      if (grab.initAngle !== null) {
-        Body.setAngle(grab.entry.body, grab.initBodyAngle + (angle - grab.initAngle));
-      }
-
-      if (prevMidRef.current) {
-        const dx = mid.x - prevMidRef.current.x;
-        const dy = mid.y - prevMidRef.current.y;
-        Body.setPosition(grab.entry.body, {
-          x: grab.entry.body.position.x + dx,
-          y: grab.entry.body.position.y + dy,
+  const updatePinchForHand = useCallback((hand, indexLm, thumbLm, smoothed) => {
+    const state = pinchStateRef.current[hand];
+    if (!indexLm || !thumbLm) {
+      // Hand not visible → release if grabbing
+      if (state.grabbing && state.entry) {
+        Body.setStatic(state.entry.body, false);
+        Body.setVelocity(state.entry.body, {
+          x: state.vel.x * 0.5, y: state.vel.y * 0.5,
         });
-        velRef.current = { x: dx, y: dy };
       }
-      prevMidRef.current = mid;
+      state.grabbing = false;
+      state.entry = null;
+      state.prevPos = null;
+      state.vel = { x: 0, y: 0 };
+      return;
     }
-  }, [pointerPos]);
 
-  const onPointerUp = useCallback((e) => {
-    pointersRef.current.delete(e.pointerId);
-    const grab = grabRef.current;
-
-    if (grab && pointersRef.current.size === 0) {
-      // Release: make dynamic and throw
-      Body.setStatic(grab.entry.body, false);
-      Body.setVelocity(grab.entry.body, {
-        x: velRef.current.x * 0.4,
-        y: velRef.current.y * 0.4,
-      });
-      grabRef.current = null;
-      prevMidRef.current = null;
-      velRef.current = { x: 0, y: 0 };
-    } else if (grab && pointersRef.current.size === 1) {
-      // 2→1 finger transition: recalculate offset
-      const remaining = Array.from(pointersRef.current.values())[0];
-      grab.offset = {
-        x: remaining.x - grab.entry.body.position.x,
-        y: remaining.y - grab.entry.body.position.y,
-      };
-      grab.initAngle = null;
-      prevMidRef.current = remaining;
-    } else if (!grab && tapStartRef.current && pointersRef.current.size === 0) {
-      // Tap on empty area → drop next line
-      dropLine();
-      tapStartRef.current = null;
+    const visOk = (indexLm.visibility ?? 0) > 0.3 && (thumbLm.visibility ?? 0) > 0.3;
+    if (!visOk) {
+      if (state.grabbing && state.entry) {
+        Body.setStatic(state.entry.body, false);
+        Body.setVelocity(state.entry.body, {
+          x: state.vel.x * 0.5, y: state.vel.y * 0.5,
+        });
+      }
+      state.grabbing = false;
+      state.entry = null;
+      state.prevPos = null;
+      state.vel = { x: 0, y: 0 };
+      return;
     }
-  }, [dropLine]);
+
+    // Normalised distance between thumb and index
+    const dist = Math.hypot(thumbLm.x - indexLm.x, thumbLm.y - indexLm.y);
+    // Midpoint in CSS coords
+    const mid = landmarkToCss(
+      (indexLm.x + thumbLm.x) / 2,
+      (indexLm.y + thumbLm.y) / 2,
+    );
+
+    if (!state.grabbing) {
+      // Check if pinching
+      if (dist < PINCH_GRAB_DIST) {
+        const entry = findBodyNear(mid.x, mid.y);
+        if (entry) {
+          // Don't steal from other hand
+          const other = hand === 'left' ? 'right' : 'left';
+          if (pinchStateRef.current[other].entry === entry) return;
+
+          state.grabbing = true;
+          state.entry = entry;
+          state.prevPos = mid;
+          state.vel = { x: 0, y: 0 };
+          Body.setStatic(entry.body, true);
+          Body.setVelocity(entry.body, { x: 0, y: 0 });
+        }
+      }
+    } else {
+      // Currently grabbing
+      if (dist > PINCH_RELEASE_DIST) {
+        // Release — throw with velocity
+        if (state.entry) {
+          Body.setStatic(state.entry.body, false);
+          Body.setVelocity(state.entry.body, {
+            x: state.vel.x * 0.5, y: state.vel.y * 0.5,
+          });
+        }
+        state.grabbing = false;
+        state.entry = null;
+        state.prevPos = null;
+        state.vel = { x: 0, y: 0 };
+      } else {
+        // Move body to follow pinch midpoint
+        if (state.entry) {
+          Body.setPosition(state.entry.body, { x: mid.x, y: mid.y });
+          if (state.prevPos) {
+            state.vel = { x: mid.x - state.prevPos.x, y: mid.y - state.prevPos.y };
+          }
+          state.prevPos = mid;
+        }
+      }
+    }
+  }, [landmarkToCss, findBodyNear]);
 
   // Main loop: physics + pose detection + canvas rendering
   useEffect(() => {
@@ -550,9 +523,26 @@ export default function FingerDrawApp() {
           });
           prevLandmarksRef.current = smoothed.map(l => ({ x: l.x, y: l.y, visibility: l.visibility }));
           updateBodyFromPose(smoothed);
+
+          // Camera-based pinch detection (camera mode only)
+          if (sourceModeRef.current === 'camera') {
+            updatePinchForHand('left',  smoothed[19], smoothed[21], smoothed);
+            updatePinchForHand('right', smoothed[20], smoothed[22], smoothed);
+          }
         } else {
           hideBody();
           prevLandmarksRef.current = null;
+          // Release any pinch grabs when pose lost
+          for (const hand of ['left', 'right']) {
+            const ps = pinchStateRef.current[hand];
+            if (ps.grabbing && ps.entry) {
+              Body.setStatic(ps.entry.body, false);
+            }
+            ps.grabbing = false;
+            ps.entry = null;
+            ps.prevPos = null;
+            ps.vel = { x: 0, y: 0 };
+          }
         }
       }
 
@@ -601,6 +591,28 @@ export default function FingerDrawApp() {
           }
           ctx.restore();
         }
+
+        // Draw pinch indicators
+        for (const hand of ['left', 'right']) {
+          const ps = pinchStateRef.current[hand];
+          if (ps.grabbing && ps.prevPos) {
+            ctx.save();
+            ctx.strokeStyle = CHAR_COLOR;
+            ctx.lineWidth = 2;
+            ctx.globalAlpha = 0.7;
+            ctx.beginPath();
+            ctx.arc(ps.prevPos.x, ps.prevPos.y, 18, 0, Math.PI * 2);
+            ctx.stroke();
+            // Inner dot
+            ctx.fillStyle = CHAR_COLOR;
+            ctx.globalAlpha = 0.4;
+            ctx.beginPath();
+            ctx.arc(ps.prevPos.x, ps.prevPos.y, 5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+          }
+        }
+
         ctx.restore();
       }
 
@@ -609,7 +621,7 @@ export default function FingerDrawApp() {
 
     animFrameRef.current = requestAnimationFrame(loop);
     return () => { if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current); };
-  }, [modelLoading, updateBodyFromPose, hideBody]);
+  }, [modelLoading, updateBodyFromPose, hideBody, updatePinchForHand]);
 
   // Toggle camera facing mode
   const toggleCamera = useCallback(() => {
@@ -617,8 +629,15 @@ export default function FingerDrawApp() {
     prevLandmarksRef.current = null;
   }, []);
 
-  // Clear all lines
+  // Clear all lines (also release any pinch grabs)
   const clearAll = useCallback(() => {
+    for (const hand of ['left', 'right']) {
+      const ps = pinchStateRef.current[hand];
+      ps.grabbing = false;
+      ps.entry = null;
+      ps.prevPos = null;
+      ps.vel = { x: 0, y: 0 };
+    }
     if (engineRef.current) {
       for (const line of lineBodiesRef.current) Composite.remove(engineRef.current.world, line.body);
     }
@@ -630,10 +649,7 @@ export default function FingerDrawApp() {
       <div
         className="fd-camera-wrap"
         ref={cameraWrapRef}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
+        onClick={dropLine}
       >
         <video ref={videoRef} autoPlay playsInline muted className={`fd-video${sourceMode === 'camera' && facingMode === 'user' ? ' fd-video-mirrored' : ''}`} />
         <div className="fd-grain" ref={grainRef} />
