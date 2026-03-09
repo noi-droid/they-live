@@ -281,22 +281,22 @@ export default function FingerDrawApp() {
       }
     }
 
-    // Head — cluster of circles, dynamically sized from ear-to-ear distance
+    // Head — cluster of circles, sized from shoulder width
     const nose = landmarks[0];
-    const leftEar = landmarks[7];
-    const rightEar = landmarks[8];
+    const lShoulder = landmarks[11];
+    const rShoulder = landmarks[12];
     const hasNose = nose && (nose.visibility ?? 0) > 0.3;
-    const hasEars = leftEar && rightEar &&
-      (leftEar.visibility ?? 0) > 0.2 && (rightEar.visibility ?? 0) > 0.2;
+    const hasShoulders = lShoulder && rShoulder &&
+      (lShoulder.visibility ?? 0) > 0.3 && (rShoulder.visibility ?? 0) > 0.3;
 
     if (hasNose) {
       const pNose = landmarkToCss(nose.x, nose.y);
-      // Estimate head radius from ear distance, or fallback
+      // Estimate head radius from shoulder width (~40% of shoulder span)
       let headR = 50;
-      if (hasEars) {
-        const pL = landmarkToCss(leftEar.x, leftEar.y);
-        const pR = landmarkToCss(rightEar.x, rightEar.y);
-        headR = Math.max(Math.hypot(pR.x - pL.x, pR.y - pL.y) * 0.55, 35);
+      if (hasShoulders) {
+        const pLS = landmarkToCss(lShoulder.x, lShoulder.y);
+        const pRS = landmarkToCss(rShoulder.x, rShoulder.y);
+        headR = Math.max(Math.hypot(pRS.x - pLS.x, pRS.y - pLS.y) * 0.38, 35);
       }
       // Head center is well above the nose
       const hcx = pNose.x;
@@ -346,8 +346,9 @@ export default function FingerDrawApp() {
     const { w: cw } = containerSizeRef.current;
     if (cw === 0) return;
 
+    // Drop in reverse order: last line first
     const idx = dropIndexRef.current % lines.length;
-    const line = lines[idx];
+    const line = lines[lines.length - 1 - idx];
     dropIndexRef.current = idx + 1;
 
     const fs = fontSizeRef.current;
