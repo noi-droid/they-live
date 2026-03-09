@@ -26,8 +26,10 @@ const CHAR_COLOR = '#C8FF00';
 
 // Camera-based pinch detection — scale-relative thresholds
 // Ratios are relative to hand size (wrist→index distance)
-const PINCH_GRAB_RATIO = 0.35;   // thumb-index / hand-size to start grab
+const PINCH_GRAB_RATIO = 0.28;   // thumb-index / hand-size to start grab
 const PINCH_RELEASE_RATIO = 0.55; // must open wider to release (hysteresis)
+const PINCH_CONFIRM_FRAMES = 4;  // consecutive pinch frames before grab triggers
+const PINCH_MIN_HAND = 0.04;     // min hand size (normalised) — ignore if too far
 const PINCH_HIT_RADIUS = 60;     // CSS-px radius for body hit-test around pinch point
 const PINCH_FOLLOW = 0.45;       // lerp factor — 0 = frozen, 1 = instant snap
 
@@ -68,8 +70,8 @@ export default function FingerDrawApp() {
   // Camera-based pinch state for each hand
   // { grabbing: false, entry: null, prevPos: null, vel: { x: 0, y: 0 } }
   const pinchStateRef = useRef({
-    left:  { grabbing: false, entry: null, prevPos: null, vel: { x: 0, y: 0 } },
-    right: { grabbing: false, entry: null, prevPos: null, vel: { x: 0, y: 0 } },
+    left:  { grabbing: false, entry: null, prevPos: null, vel: { x: 0, y: 0 }, frames: 0 },
+    right: { grabbing: false, entry: null, prevPos: null, vel: { x: 0, y: 0 }, frames: 0 },
   });
 
   const fileInputRef = useRef(null);
@@ -441,6 +443,7 @@ export default function FingerDrawApp() {
       state.entry = null;
       state.prevPos = null;
       state.vel = { x: 0, y: 0 };
+      state.frames = 0;
     };
 
     if (!indexLm || !thumbLm || !wristLm) { releasePinch(); return; }
@@ -452,7 +455,7 @@ export default function FingerDrawApp() {
 
     // Hand size = wrist→index distance (scales with camera distance)
     const handSize = Math.hypot(indexLm.x - wristLm.x, indexLm.y - wristLm.y);
-    if (handSize < 0.01) { releasePinch(); return; } // too small to be reliable
+    if (handSize < PINCH_MIN_HAND) { releasePinch(); return; } // too far / too small
 
     // Dynamic thresholds relative to hand size
     const grabDist = handSize * PINCH_GRAB_RATIO;
@@ -467,21 +470,26 @@ export default function FingerDrawApp() {
     );
 
     if (!state.grabbing) {
-      // Check if pinching
+      // Check if pinching — require consecutive frames to avoid false positives
       if (dist < grabDist) {
-        const entry = findBodyNear(mid.x, mid.y);
-        if (entry) {
-          // Don't steal from other hand
-          const other = hand === 'left' ? 'right' : 'left';
-          if (pinchStateRef.current[other].entry === entry) return;
+        state.frames++;
+        if (state.frames >= PINCH_CONFIRM_FRAMES) {
+          const entry = findBodyNear(mid.x, mid.y);
+          if (entry) {
+            // Don't steal from other hand
+            const other = hand === 'left' ? 'right' : 'left';
+            if (pinchStateRef.current[other].entry === entry) return;
 
-          state.grabbing = true;
-          state.entry = entry;
-          state.prevPos = mid;
-          state.vel = { x: 0, y: 0 };
-          Body.setStatic(entry.body, true);
-          Body.setVelocity(entry.body, { x: 0, y: 0 });
+            state.grabbing = true;
+            state.entry = entry;
+            state.prevPos = mid;
+            state.vel = { x: 0, y: 0 };
+            Body.setStatic(entry.body, true);
+            Body.setVelocity(entry.body, { x: 0, y: 0 });
+          }
         }
+      } else {
+        state.frames = 0; // reset if fingers open
       }
     } else {
       // Currently grabbing
@@ -655,6 +663,7 @@ export default function FingerDrawApp() {
       ps.entry = null;
       ps.prevPos = null;
       ps.vel = { x: 0, y: 0 };
+      ps.frames = 0;
     }
     if (engineRef.current) {
       for (const line of lineBodiesRef.current) Composite.remove(engineRef.current.world, line.body);
