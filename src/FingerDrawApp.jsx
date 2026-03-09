@@ -19,7 +19,8 @@ const BODY_SEGMENTS = [
 
 const CIRCLES_PER_SEGMENT = 16;
 const SEGMENT_CIRCLE_RADIUS = 22;
-const HEAD_CIRCLE_RADIUS = 50;
+const HEAD_CIRCLES_COUNT = 9;
+const HEAD_CIRCLE_R = 22;
 const MAX_LINES = 50;
 const CHAR_COLOR = '#C8FF00';
 
@@ -32,7 +33,7 @@ export default function FingerDrawApp() {
   const poseLandmarkerRef = useRef(null);
   const engineRef = useRef(null);
   const segmentCirclesRef = useRef([]);
-  const headCircleRef = useRef(null);
+  const headCirclesRef = useRef([]);
   const lineBodiesRef = useRef([]);
   const wallsRef = useRef([]);
   const animFrameRef = useRef(null);
@@ -229,14 +230,18 @@ export default function FingerDrawApp() {
     }
     segmentCirclesRef.current = circles;
 
-    // Create head collision circle
-    const head = Bodies.circle(-1000, -1000, HEAD_CIRCLE_RADIUS, {
-      isStatic: true,
-      friction: 0.3,
-      restitution: 0.4,
-    });
-    Composite.add(engine.world, head);
-    headCircleRef.current = head;
+    // Create head collision circles (cluster)
+    const headCircles = [];
+    for (let i = 0; i < HEAD_CIRCLES_COUNT; i++) {
+      const c = Bodies.circle(-1000, -1000, HEAD_CIRCLE_R, {
+        isStatic: true,
+        friction: 0.3,
+        restitution: 0.4,
+      });
+      Composite.add(engine.world, c);
+      headCircles.push(c);
+    }
+    headCirclesRef.current = headCircles;
 
     return () => {
       ro.disconnect();
@@ -248,8 +253,8 @@ export default function FingerDrawApp() {
   // Update body collision from pose landmarks
   const updateBodyFromPose = useCallback((landmarks) => {
     const circles = segmentCirclesRef.current;
-    const head = headCircleRef.current;
-    if (!circles.length || !head) return;
+    const headCircles = headCirclesRef.current;
+    if (!circles.length || !headCircles.length) return;
 
     for (let s = 0; s < BODY_SEGMENTS.length; s++) {
       const [a, b] = BODY_SEGMENTS[s];
@@ -276,13 +281,49 @@ export default function FingerDrawApp() {
       }
     }
 
-    // Head
+    // Head — cluster of circles, dynamically sized from ear-to-ear distance
     const nose = landmarks[0];
-    if (nose && (nose.visibility ?? 0) > 0.3) {
-      const p = landmarkToCss(nose.x, nose.y);
-      Body.setPosition(head, { x: p.x, y: p.y - HEAD_CIRCLE_RADIUS * 0.3 });
+    const leftEar = landmarks[7];
+    const rightEar = landmarks[8];
+    const hasNose = nose && (nose.visibility ?? 0) > 0.3;
+    const hasEars = leftEar && rightEar &&
+      (leftEar.visibility ?? 0) > 0.2 && (rightEar.visibility ?? 0) > 0.2;
+
+    if (hasNose) {
+      const pNose = landmarkToCss(nose.x, nose.y);
+      // Estimate head radius from ear distance, or fallback
+      let headR = 50;
+      if (hasEars) {
+        const pL = landmarkToCss(leftEar.x, leftEar.y);
+        const pR = landmarkToCss(rightEar.x, rightEar.y);
+        headR = Math.max(Math.hypot(pR.x - pL.x, pR.y - pL.y) * 0.55, 35);
+      }
+      // Head center is well above the nose
+      const hcx = pNose.x;
+      const hcy = pNose.y - headR * 0.65;
+
+      // Spread circles in oval pattern covering full head
+      const offsets = [
+        [0, 0],            // center
+        [0, -0.75],        // top
+        [0, 0.65],         // chin
+        [-0.6, -0.2],      // left
+        [0.6, -0.2],       // right
+        [-0.4, -0.6],      // upper-left
+        [0.4, -0.6],       // upper-right
+        [-0.35, 0.4],      // lower-left
+        [0.35, 0.4],       // lower-right
+      ];
+      for (let i = 0; i < HEAD_CIRCLES_COUNT; i++) {
+        Body.setPosition(headCircles[i], {
+          x: hcx + offsets[i][0] * headR,
+          y: hcy + offsets[i][1] * headR,
+        });
+      }
     } else {
-      Body.setPosition(head, { x: -1000, y: -1000 });
+      for (let i = 0; i < HEAD_CIRCLES_COUNT; i++) {
+        Body.setPosition(headCircles[i], { x: -1000, y: -1000 });
+      }
     }
   }, [landmarkToCss]);
 
@@ -291,8 +332,8 @@ export default function FingerDrawApp() {
     for (const c of segmentCirclesRef.current) {
       Body.setPosition(c, { x: -1000, y: -1000 });
     }
-    if (headCircleRef.current) {
-      Body.setPosition(headCircleRef.current, { x: -1000, y: -1000 });
+    for (const c of headCirclesRef.current) {
+      Body.setPosition(c, { x: -1000, y: -1000 });
     }
   }, []);
 
