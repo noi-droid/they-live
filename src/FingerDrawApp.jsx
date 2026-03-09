@@ -357,7 +357,9 @@ export default function FingerDrawApp() {
     const lineW = measureLineWidth(line, fs, trk);
     const bodyW = Math.max(lineW, fs * 0.5);
 
-    const x = Math.max(bodyW / 2, Math.min(cw - bodyW / 2, cx));
+    // Random horizontal position within visible area
+    const margin = bodyW / 2;
+    const x = margin + Math.random() * (cw - bodyW);
     const y = -bodyH - Math.random() * 40;
 
     const body = Bodies.rectangle(x, y, bodyW, bodyH, {
