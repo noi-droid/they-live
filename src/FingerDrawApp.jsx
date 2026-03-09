@@ -44,11 +44,11 @@ export default function FingerDrawApp() {
   const dropIndexRef = useRef(0);
 
   const [modelLoading, setModelLoading] = useState(true);
-  const [inputText, setInputText] = useState('THEY LIVE');
+  const [inputText, setInputText] = useState('THEY\nLIVE');
   const [fontSize, setFontSize] = useState(48);
   const [tracking, setTracking] = useState(0);
   const [facingMode, setFacingMode] = useState('user');
-  const inputTextRef = useRef('THEY LIVE');
+  const inputTextRef = useRef('THEY\nLIVE');
   const fontSizeRef = useRef(48);
   const trackingRef = useRef(0);
   const facingModeRef = useRef('user');
@@ -490,7 +490,7 @@ export default function FingerDrawApp() {
           value={inputText}
           onChange={e => setInputText(e.target.value)}
           placeholder="Enter text (one line per body)..."
-          rows={Math.min(inputText.split('\n').length, 3) || 1}
+          rows={Math.max(2, Math.min(inputText.split('\n').length, 4))}
         />
         <div className="fd-toolbar">
           <div className="fd-sliders">
