@@ -3,7 +3,7 @@ import { PoseLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
 import Matter from 'matter-js';
 import './FingerDrawApp.css';
 
-const { Engine, Bodies, Body, Composite } = Matter;
+const { Engine, Bodies, Body, Composite, Query } = Matter;
 
 // Body landmark pairs for collision segments
 const BODY_SEGMENTS = [
@@ -23,6 +23,7 @@ const HEAD_CIRCLES_COUNT = 9;
 const HEAD_CIRCLE_R = 22;
 const MAX_LINES = 50;
 const CHAR_COLOR = '#C8FF00';
+const TAP_THRESHOLD = 10; // px — movement below this counts as tap
 
 let nextLineId = 0;
 
@@ -44,6 +45,13 @@ export default function FingerDrawApp() {
   const measureCtxRef = useRef(null);
   const dropIndexRef = useRef(0);
 
+  // Pointer / grab tracking
+  const pointersRef = useRef(new Map());
+  const grabRef = useRef(null);
+  const tapStartRef = useRef(null);
+  const prevMidRef = useRef(null);
+  const velRef = useRef({ x: 0, y: 0 });
+
   const [modelLoading, setModelLoading] = useState(true);
   const [inputText, setInputText] = useState('THEY\nLIVE');
   const [fontSize, setFontSize] = useState(48);
@@ -59,17 +67,9 @@ export default function FingerDrawApp() {
     dropIndexRef.current = 0;
   }, [inputText]);
 
-  useEffect(() => {
-    fontSizeRef.current = fontSize;
-  }, [fontSize]);
-
-  useEffect(() => {
-    trackingRef.current = tracking;
-  }, [tracking]);
-
-  useEffect(() => {
-    facingModeRef.current = facingMode;
-  }, [facingMode]);
+  useEffect(() => { fontSizeRef.current = fontSize; }, [fontSize]);
+  useEffect(() => { trackingRef.current = tracking; }, [tracking]);
+  useEffect(() => { facingModeRef.current = facingMode; }, [facingMode]);
 
   // Create offscreen canvas for text measurement
   useEffect(() => {
@@ -78,16 +78,13 @@ export default function FingerDrawApp() {
   }, []);
 
   // Ensure OTR Grotesk is loaded for canvas rendering
-  useEffect(() => {
-    document.fonts.load("72px 'OTR Grotesk'");
-  }, []);
+  useEffect(() => { document.fonts.load("72px 'OTR Grotesk'"); }, []);
 
   // Generate grain noise texture
   useEffect(() => {
     const size = 150;
     const c = document.createElement('canvas');
-    c.width = size;
-    c.height = size;
+    c.width = size; c.height = size;
     const ctx = c.getContext('2d');
     const img = ctx.createImageData(size, size);
     const d = img.data;
@@ -159,17 +156,13 @@ export default function FingerDrawApp() {
         console.error('PoseLandmarker init error:', e);
       }
     })();
-    return () => {
-      cancelled = true;
-      poseLandmarkerRef.current?.close();
-    };
+    return () => { cancelled = true; poseLandmarkerRef.current?.close(); };
   }, []);
 
   // Start camera (restarts when facingMode changes)
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      // Stop previous stream
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(t => t.stop());
         streamRef.current = null;
@@ -185,10 +178,7 @@ export default function FingerDrawApp() {
         console.error('Camera error:', e);
       }
     })();
-    return () => {
-      cancelled = true;
-      streamRef.current?.getTracks().forEach(t => t.stop());
-    };
+    return () => { cancelled = true; streamRef.current?.getTracks().forEach(t => t.stop()); };
   }, [facingMode]);
 
   // Init matter.js engine, walls, body collision circles
@@ -201,9 +191,7 @@ export default function FingerDrawApp() {
       if (!container) return;
       const { width: cw, height: ch } = container.getBoundingClientRect();
       containerSizeRef.current = { w: cw, h: ch };
-      if (wallsRef.current.length) {
-        Composite.remove(engine.world, wallsRef.current);
-      }
+      if (wallsRef.current.length) Composite.remove(engine.world, wallsRef.current);
       const t = 60;
       wallsRef.current = [
         Bodies.rectangle(cw / 2, ch + t / 2, cw * 2, t, { isStatic: true }),
@@ -217,37 +205,27 @@ export default function FingerDrawApp() {
     const ro = new ResizeObserver(updateWalls);
     if (cameraWrapRef.current) ro.observe(cameraWrapRef.current);
 
-    // Create body segment collision circles
     const circles = [];
     for (let i = 0; i < BODY_SEGMENTS.length * CIRCLES_PER_SEGMENT; i++) {
       const c = Bodies.circle(-1000, -1000, SEGMENT_CIRCLE_RADIUS, {
-        isStatic: true,
-        friction: 0.3,
-        restitution: 0.4,
+        isStatic: true, friction: 0.3, restitution: 0.4,
       });
       Composite.add(engine.world, c);
       circles.push(c);
     }
     segmentCirclesRef.current = circles;
 
-    // Create head collision circles (cluster)
     const headCircles = [];
     for (let i = 0; i < HEAD_CIRCLES_COUNT; i++) {
       const c = Bodies.circle(-1000, -1000, HEAD_CIRCLE_R, {
-        isStatic: true,
-        friction: 0.3,
-        restitution: 0.4,
+        isStatic: true, friction: 0.3, restitution: 0.4,
       });
       Composite.add(engine.world, c);
       headCircles.push(c);
     }
     headCirclesRef.current = headCircles;
 
-    return () => {
-      ro.disconnect();
-      Engine.clear(engine);
-      engineRef.current = null;
-    };
+    return () => { ro.disconnect(); Engine.clear(engine); engineRef.current = null; };
   }, []);
 
   // Update body collision from pose landmarks
@@ -291,28 +269,19 @@ export default function FingerDrawApp() {
 
     if (hasNose) {
       const pNose = landmarkToCss(nose.x, nose.y);
-      // Estimate head radius from shoulder width (~40% of shoulder span)
       let headR = 50;
       if (hasShoulders) {
         const pLS = landmarkToCss(lShoulder.x, lShoulder.y);
         const pRS = landmarkToCss(rShoulder.x, rShoulder.y);
         headR = Math.max(Math.hypot(pRS.x - pLS.x, pRS.y - pLS.y) * 0.38, 35);
       }
-      // Head center is well above the nose
       const hcx = pNose.x;
       const hcy = pNose.y - headR * 0.65;
-
-      // Spread circles in oval pattern covering full head
       const offsets = [
-        [0, 0],            // center
-        [0, -0.75],        // top
-        [0, 0.65],         // chin
-        [-0.6, -0.2],      // left
-        [0.6, -0.2],       // right
-        [-0.4, -0.6],      // upper-left
-        [0.4, -0.6],       // upper-right
-        [-0.35, 0.4],      // lower-left
-        [0.35, 0.4],       // lower-right
+        [0, 0], [0, -0.75], [0, 0.65],
+        [-0.6, -0.2], [0.6, -0.2],
+        [-0.4, -0.6], [0.4, -0.6],
+        [-0.35, 0.4], [0.35, 0.4],
       ];
       for (let i = 0; i < HEAD_CIRCLES_COUNT; i++) {
         Body.setPosition(headCircles[i], {
@@ -329,16 +298,12 @@ export default function FingerDrawApp() {
 
   // Hide body when no pose detected
   const hideBody = useCallback(() => {
-    for (const c of segmentCirclesRef.current) {
-      Body.setPosition(c, { x: -1000, y: -1000 });
-    }
-    for (const c of headCirclesRef.current) {
-      Body.setPosition(c, { x: -1000, y: -1000 });
-    }
+    for (const c of segmentCirclesRef.current) Body.setPosition(c, { x: -1000, y: -1000 });
+    for (const c of headCirclesRef.current) Body.setPosition(c, { x: -1000, y: -1000 });
   }, []);
 
-  // Drop one line at a time per tap, cycling through lines in order
-  const dropLineAt = useCallback((cx) => {
+  // Drop next line (random x, reverse order)
+  const dropLine = useCallback(() => {
     if (!engineRef.current) return;
     const text = inputTextRef.current;
     const lines = text.split('\n').filter(l => l.length > 0);
@@ -346,7 +311,6 @@ export default function FingerDrawApp() {
     const { w: cw } = containerSizeRef.current;
     if (cw === 0) return;
 
-    // Drop in reverse order: last line first
     const idx = dropIndexRef.current % lines.length;
     const line = lines[lines.length - 1 - idx];
     dropIndexRef.current = idx + 1;
@@ -357,43 +321,154 @@ export default function FingerDrawApp() {
     const lineW = measureLineWidth(line, fs, trk);
     const bodyW = Math.max(lineW, fs * 0.5);
 
-    // Random horizontal position within visible area
     const margin = bodyW / 2;
     const x = margin + Math.random() * (cw - bodyW);
     const y = -bodyH - Math.random() * 40;
 
     const body = Bodies.rectangle(x, y, bodyW, bodyH, {
-      restitution: 0.25,
-      friction: 0.6,
-      frictionAir: 0.003,
+      restitution: 0.25, friction: 0.6, frictionAir: 0.003,
       angle: (Math.random() - 0.5) * 0.15,
     });
-
-    Body.setVelocity(body, {
-      x: (Math.random() - 0.5) * 2,
-      y: 2 + Math.random() * 2,
-    });
+    Body.setVelocity(body, { x: (Math.random() - 0.5) * 2, y: 2 + Math.random() * 2 });
 
     Composite.add(engineRef.current.world, body);
-    lineBodiesRef.current.push({
-      id: ++nextLineId, body, text: line, fontSize: fs, tracking: trk,
-    });
+    lineBodiesRef.current.push({ id: ++nextLineId, body, text: line, fontSize: fs, tracking: trk });
 
-    // Remove excess (oldest first)
     while (lineBodiesRef.current.length > MAX_LINES) {
       const oldest = lineBodiesRef.current.shift();
       if (engineRef.current) Composite.remove(engineRef.current.world, oldest.body);
     }
   }, [measureLineWidth]);
 
-  // Handle tap on camera area to drop next line
-  const handleTap = useCallback((e) => {
+  // ── Pointer event handlers (tap / 1-finger drag / 2-finger pinch) ──
+
+  const findBodyAt = useCallback((px, py) => {
+    const allBodies = lineBodiesRef.current.map(l => l.body);
+    const hits = Query.point(allBodies, { x: px, y: py });
+    if (!hits.length) return null;
+    return lineBodiesRef.current.find(l => l.body === hits[0]) || null;
+  }, []);
+
+  const pointerPos = useCallback((e) => {
+    const rect = cameraWrapRef.current?.getBoundingClientRect();
+    if (!rect) return { x: 0, y: 0 };
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  }, []);
+
+  const onPointerDown = useCallback((e) => {
     const container = cameraWrapRef.current;
     if (!container) return;
-    const cRect = container.getBoundingClientRect();
-    const cx = e.clientX - cRect.left;
-    dropLineAt(cx);
-  }, [dropLineAt]);
+    const pos = pointerPos(e);
+    container.setPointerCapture(e.pointerId);
+    pointersRef.current.set(e.pointerId, pos);
+
+    if (pointersRef.current.size === 1) {
+      const entry = findBodyAt(pos.x, pos.y);
+      if (entry) {
+        // Grab body
+        grabRef.current = {
+          entry,
+          offset: { x: pos.x - entry.body.position.x, y: pos.y - entry.body.position.y },
+          initAngle: null,
+          initBodyAngle: entry.body.angle,
+        };
+        Body.setStatic(entry.body, true);
+        Body.setVelocity(entry.body, { x: 0, y: 0 });
+        prevMidRef.current = pos;
+        velRef.current = { x: 0, y: 0 };
+        tapStartRef.current = null;
+      } else {
+        // Potential tap
+        grabRef.current = null;
+        tapStartRef.current = pos;
+      }
+    } else if (pointersRef.current.size === 2 && grabRef.current) {
+      // Second finger: enable rotation
+      tapStartRef.current = null;
+      const pts = Array.from(pointersRef.current.values());
+      grabRef.current.initAngle = Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x);
+      grabRef.current.initBodyAngle = grabRef.current.entry.body.angle;
+      prevMidRef.current = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
+    }
+  }, [findBodyAt, pointerPos]);
+
+  const onPointerMove = useCallback((e) => {
+    if (!pointersRef.current.has(e.pointerId)) return;
+    const pos = pointerPos(e);
+    pointersRef.current.set(e.pointerId, pos);
+
+    // Cancel tap if moved too far
+    if (tapStartRef.current) {
+      const dx = pos.x - tapStartRef.current.x;
+      const dy = pos.y - tapStartRef.current.y;
+      if (Math.hypot(dx, dy) > TAP_THRESHOLD) tapStartRef.current = null;
+    }
+
+    const grab = grabRef.current;
+    if (!grab) return;
+    const pointers = pointersRef.current;
+
+    if (pointers.size === 1) {
+      // Single finger drag
+      const nx = pos.x - grab.offset.x;
+      const ny = pos.y - grab.offset.y;
+      Body.setPosition(grab.entry.body, { x: nx, y: ny });
+      if (prevMidRef.current) {
+        velRef.current = { x: pos.x - prevMidRef.current.x, y: pos.y - prevMidRef.current.y };
+      }
+      prevMidRef.current = pos;
+    } else if (pointers.size === 2) {
+      // Two-finger: rotate + translate
+      const pts = Array.from(pointers.values());
+      const mid = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
+      const angle = Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x);
+
+      if (grab.initAngle !== null) {
+        Body.setAngle(grab.entry.body, grab.initBodyAngle + (angle - grab.initAngle));
+      }
+
+      if (prevMidRef.current) {
+        const dx = mid.x - prevMidRef.current.x;
+        const dy = mid.y - prevMidRef.current.y;
+        Body.setPosition(grab.entry.body, {
+          x: grab.entry.body.position.x + dx,
+          y: grab.entry.body.position.y + dy,
+        });
+        velRef.current = { x: dx, y: dy };
+      }
+      prevMidRef.current = mid;
+    }
+  }, [pointerPos]);
+
+  const onPointerUp = useCallback((e) => {
+    pointersRef.current.delete(e.pointerId);
+    const grab = grabRef.current;
+
+    if (grab && pointersRef.current.size === 0) {
+      // Release: make dynamic and throw
+      Body.setStatic(grab.entry.body, false);
+      Body.setVelocity(grab.entry.body, {
+        x: velRef.current.x * 0.4,
+        y: velRef.current.y * 0.4,
+      });
+      grabRef.current = null;
+      prevMidRef.current = null;
+      velRef.current = { x: 0, y: 0 };
+    } else if (grab && pointersRef.current.size === 1) {
+      // 2→1 finger transition: recalculate offset
+      const remaining = Array.from(pointersRef.current.values())[0];
+      grab.offset = {
+        x: remaining.x - grab.entry.body.position.x,
+        y: remaining.y - grab.entry.body.position.y,
+      };
+      grab.initAngle = null;
+      prevMidRef.current = remaining;
+    } else if (!grab && tapStartRef.current && pointersRef.current.size === 0) {
+      // Tap on empty area → drop next line
+      dropLine();
+      tapStartRef.current = null;
+    }
+  }, [dropLine]);
 
   // Main loop: physics + pose detection + canvas rendering
   useEffect(() => {
@@ -402,12 +477,10 @@ export default function FingerDrawApp() {
     let lastDetectTime = -1;
 
     function loop(now) {
-      // Physics update
       const dt = Math.min(now - lastTime, 33);
       lastTime = now;
       if (engineRef.current) Engine.update(engineRef.current, dt);
 
-      // Pose detection with smoothing
       const video = videoRef.current;
       const pl = poseLandmarkerRef.current;
       if (video && pl && video.readyState >= 2 && video.currentTime !== lastDetectTime) {
@@ -415,18 +488,13 @@ export default function FingerDrawApp() {
         const res = pl.detectForVideo(video, now);
         if (res.landmarks?.length > 0) {
           const raw = res.landmarks[0];
-          // Exponential smoothing to reduce jitter
           const SMOOTH = 0.35;
           if (!prevLandmarksRef.current) {
             prevLandmarksRef.current = raw.map(l => ({ x: l.x, y: l.y, visibility: l.visibility }));
           }
           const smoothed = raw.map((l, i) => {
             const p = prevLandmarksRef.current[i];
-            return {
-              ...l,
-              x: p.x + (l.x - p.x) * (1 - SMOOTH),
-              y: p.y + (l.y - p.y) * (1 - SMOOTH),
-            };
+            return { ...l, x: p.x + (l.x - p.x) * (1 - SMOOTH), y: p.y + (l.y - p.y) * (1 - SMOOTH) };
           });
           prevLandmarksRef.current = smoothed.map(l => ({ x: l.x, y: l.y, visibility: l.visibility }));
           updateBodyFromPose(smoothed);
@@ -444,8 +512,7 @@ export default function FingerDrawApp() {
         const pw = Math.round(cw * dpr);
         const ph = Math.round(ch * dpr);
         if (canvas.width !== pw || canvas.height !== ph) {
-          canvas.width = pw;
-          canvas.height = ph;
+          canvas.width = pw; canvas.height = ph;
         }
 
         const ctx = canvas.getContext('2d');
@@ -464,7 +531,6 @@ export default function FingerDrawApp() {
           ctx.textBaseline = 'middle';
           ctx.textAlign = 'left';
 
-          // Measure char widths for tracking layout
           const chars = line.text;
           const trk = line.tracking;
           let totalW = 0;
@@ -481,10 +547,8 @@ export default function FingerDrawApp() {
             ctx.fillText(chars[i], drawX, 0);
             drawX += charWidths[i] + trk;
           }
-
           ctx.restore();
         }
-
         ctx.restore();
       }
 
@@ -492,9 +556,7 @@ export default function FingerDrawApp() {
     }
 
     animFrameRef.current = requestAnimationFrame(loop);
-    return () => {
-      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
-    };
+    return () => { if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current); };
   }, [modelLoading, updateBodyFromPose, hideBody]);
 
   // Toggle camera facing mode
@@ -506,16 +568,21 @@ export default function FingerDrawApp() {
   // Clear all lines
   const clearAll = useCallback(() => {
     if (engineRef.current) {
-      for (const line of lineBodiesRef.current) {
-        Composite.remove(engineRef.current.world, line.body);
-      }
+      for (const line of lineBodiesRef.current) Composite.remove(engineRef.current.world, line.body);
     }
     lineBodiesRef.current = [];
   }, []);
 
   return (
     <div className="finger-draw-app">
-      <div className="fd-camera-wrap" ref={cameraWrapRef} onClick={handleTap}>
+      <div
+        className="fd-camera-wrap"
+        ref={cameraWrapRef}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+      >
         <video ref={videoRef} autoPlay playsInline muted className={`fd-video${facingMode === 'user' ? ' fd-video-mirrored' : ''}`} />
         <div className="fd-grain" ref={grainRef} />
         <canvas ref={charCanvasRef} className="fd-char-canvas" />
@@ -540,33 +607,17 @@ export default function FingerDrawApp() {
           <div className="fd-sliders">
             <div className="fd-size-control">
               <span className="fd-size-label">{fontSize}px</span>
-              <input
-                type="range"
-                className="fd-size-slider"
-                min="24"
-                max="400"
-                value={fontSize}
-                onChange={e => setFontSize(Number(e.target.value))}
-              />
+              <input type="range" className="fd-size-slider" min="24" max="400"
+                value={fontSize} onChange={e => setFontSize(Number(e.target.value))} />
             </div>
             <div className="fd-size-control">
               <span className="fd-size-label">{tracking > 0 ? '+' : ''}{tracking}</span>
-              <input
-                type="range"
-                className="fd-size-slider"
-                min="-20"
-                max="100"
-                value={tracking}
-                onChange={e => setTracking(Number(e.target.value))}
-              />
+              <input type="range" className="fd-size-slider" min="-20" max="100"
+                value={tracking} onChange={e => setTracking(Number(e.target.value))} />
             </div>
           </div>
-          <button onClick={toggleCamera} className="fd-btn">
-            &#x21C6;
-          </button>
-          <button onClick={clearAll} className="fd-btn">
-            CLEAR
-          </button>
+          <button onClick={toggleCamera} className="fd-btn">&#x21C6;</button>
+          <button onClick={clearAll} className="fd-btn">CLEAR</button>
         </div>
       </div>
     </div>

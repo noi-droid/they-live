@@ -20,7 +20,7 @@
   position: relative;
   flex: 1;
   overflow: hidden;
-  touch-action: manipulation;
+  touch-action: none;
 }
 
 /* Monochrome analog video */
