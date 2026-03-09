@@ -41,6 +41,7 @@ export default function FingerDrawApp() {
   const grainRef = useRef(null);
   const prevLandmarksRef = useRef(null);
   const measureCtxRef = useRef(null);
+  const dropIndexRef = useRef(0);
 
   const [modelLoading, setModelLoading] = useState(true);
   const [inputText, setInputText] = useState('THEY LIVE');
@@ -54,6 +55,7 @@ export default function FingerDrawApp() {
 
   useEffect(() => {
     inputTextRef.current = inputText;
+    dropIndexRef.current = 0;
   }, [inputText]);
 
   useEffect(() => {
@@ -294,8 +296,8 @@ export default function FingerDrawApp() {
     }
   }, []);
 
-  // Drop lines at a given CSS position (tap-to-drop)
-  const dropLinesAt = useCallback((cx) => {
+  // Drop one line at a time per tap, cycling through lines in order
+  const dropLineAt = useCallback((cx) => {
     if (!engineRef.current) return;
     const text = inputTextRef.current;
     const lines = text.split('\n').filter(l => l.length > 0);
@@ -303,36 +305,35 @@ export default function FingerDrawApp() {
     const { w: cw } = containerSizeRef.current;
     if (cw === 0) return;
 
+    const idx = dropIndexRef.current % lines.length;
+    const line = lines[idx];
+    dropIndexRef.current = idx + 1;
+
     const fs = fontSizeRef.current;
     const trk = trackingRef.current;
-    // Use cap-height ratio (~0.72) for tighter vertical fit
     const bodyH = fs * 0.75;
+    const lineW = measureLineWidth(line, fs, trk);
+    const bodyW = Math.max(lineW, fs * 0.5);
 
-    for (let li = 0; li < lines.length; li++) {
-      const line = lines[li];
-      const lineW = measureLineWidth(line, fs, trk);
-      const bodyW = Math.max(lineW, fs * 0.5);
+    const x = Math.max(bodyW / 2, Math.min(cw - bodyW / 2, cx));
+    const y = -bodyH - Math.random() * 40;
 
-      const x = Math.max(bodyW / 2, Math.min(cw - bodyW / 2, cx));
-      const y = -bodyH - li * (bodyH + 8) - Math.random() * 40;
+    const body = Bodies.rectangle(x, y, bodyW, bodyH, {
+      restitution: 0.25,
+      friction: 0.6,
+      frictionAir: 0.003,
+      angle: (Math.random() - 0.5) * 0.15,
+    });
 
-      const body = Bodies.rectangle(x, y, bodyW, bodyH, {
-        restitution: 0.25,
-        friction: 0.6,
-        frictionAir: 0.003,
-        angle: (Math.random() - 0.5) * 0.15,
-      });
+    Body.setVelocity(body, {
+      x: (Math.random() - 0.5) * 2,
+      y: 2 + Math.random() * 2,
+    });
 
-      Body.setVelocity(body, {
-        x: (Math.random() - 0.5) * 2,
-        y: 2 + Math.random() * 2,
-      });
-
-      Composite.add(engineRef.current.world, body);
-      lineBodiesRef.current.push({
-        id: ++nextLineId, body, text: line, fontSize: fs, tracking: trk,
-      });
-    }
+    Composite.add(engineRef.current.world, body);
+    lineBodiesRef.current.push({
+      id: ++nextLineId, body, text: line, fontSize: fs, tracking: trk,
+    });
 
     // Remove excess (oldest first)
     while (lineBodiesRef.current.length > MAX_LINES) {
@@ -341,14 +342,14 @@ export default function FingerDrawApp() {
     }
   }, [measureLineWidth]);
 
-  // Handle tap on camera area to drop lines
+  // Handle tap on camera area to drop next line
   const handleTap = useCallback((e) => {
     const container = cameraWrapRef.current;
     if (!container) return;
     const cRect = container.getBoundingClientRect();
     const cx = e.clientX - cRect.left;
-    dropLinesAt(cx);
-  }, [dropLinesAt]);
+    dropLineAt(cx);
+  }, [dropLineAt]);
 
   // Main loop: physics + pose detection + canvas rendering
   useEffect(() => {
