@@ -429,8 +429,16 @@ export default function FingerDrawApp() {
     return best;
   }, []);
 
-  const updatePinchForHand = useCallback((hand, indexLm, thumbLm, wristLm) => {
+  const updatePinchForHand = useCallback((hand, smoothed) => {
     const state = pinchStateRef.current[hand];
+    const isLeft = hand === 'left';
+
+    // Landmark indices: left 19/21/15/13/23, right 20/22/16/14/24
+    const indexLm  = smoothed[isLeft ? 19 : 20];
+    const thumbLm  = smoothed[isLeft ? 21 : 22];
+    const wristLm  = smoothed[isLeft ? 15 : 16];
+    const elbowLm  = smoothed[isLeft ? 13 : 14];
+    const hipLm    = smoothed[isLeft ? 23 : 24];
 
     const releasePinch = () => {
       if (state.grabbing && state.entry) {
@@ -455,11 +463,33 @@ export default function FingerDrawApp() {
 
     // Hand size = wrist→index distance (scales with camera distance)
     const handSize = Math.hypot(indexLm.x - wristLm.x, indexLm.y - wristLm.y);
-    if (handSize < PINCH_MIN_HAND) { releasePinch(); return; } // too far / too small
+    if (handSize < PINCH_MIN_HAND) { releasePinch(); return; }
+
+    // ── Resting-arm filter ──
+    // If wrist is below elbow (arm hanging down), skip pinch detection.
+    // In normalised coords, larger Y = lower on screen.
+    if (!state.grabbing && elbowLm && (elbowLm.visibility ?? 0) > 0.3) {
+      const wristBelowElbow = wristLm.y - elbowLm.y;
+      if (wristBelowElbow > handSize * 0.6) {
+        state.frames = 0;
+        return;
+      }
+    }
+    // Also skip if wrist is very close to the hip (arm resting at side)
+    if (!state.grabbing && hipLm && (hipLm.visibility ?? 0) > 0.3) {
+      const wristToHip = Math.hypot(wristLm.x - hipLm.x, wristLm.y - hipLm.y);
+      if (wristToHip < handSize * 1.2) {
+        state.frames = 0;
+        return;
+      }
+    }
 
     // Dynamic thresholds relative to hand size
     const grabDist = handSize * PINCH_GRAB_RATIO;
     const releaseDist = handSize * PINCH_RELEASE_RATIO;
+
+    // More confirm frames needed when hand is smaller (farther from camera)
+    const confirmNeeded = handSize < 0.06 ? PINCH_CONFIRM_FRAMES + 3 : PINCH_CONFIRM_FRAMES;
 
     // Normalised distance between thumb and index
     const dist = Math.hypot(thumbLm.x - indexLm.x, thumbLm.y - indexLm.y);
@@ -473,7 +503,7 @@ export default function FingerDrawApp() {
       // Check if pinching — require consecutive frames to avoid false positives
       if (dist < grabDist) {
         state.frames++;
-        if (state.frames >= PINCH_CONFIRM_FRAMES) {
+        if (state.frames >= confirmNeeded) {
           const entry = findBodyNear(mid.x, mid.y);
           if (entry) {
             // Don't steal from other hand
@@ -552,8 +582,8 @@ export default function FingerDrawApp() {
 
           // Camera-based pinch detection (camera mode only)
           if (sourceModeRef.current === 'camera') {
-            updatePinchForHand('left',  smoothed[19], smoothed[21], smoothed[15]);
-            updatePinchForHand('right', smoothed[20], smoothed[22], smoothed[16]);
+            updatePinchForHand('left',  smoothed);
+            updatePinchForHand('right', smoothed);
           }
         } else {
           hideBody();
