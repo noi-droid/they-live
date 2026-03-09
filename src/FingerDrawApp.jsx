@@ -52,15 +52,20 @@ export default function FingerDrawApp() {
   const prevMidRef = useRef(null);
   const velRef = useRef({ x: 0, y: 0 });
 
+  const fileInputRef = useRef(null);
+  const videoFileUrlRef = useRef(null);
+
   const [modelLoading, setModelLoading] = useState(true);
   const [inputText, setInputText] = useState('THEY\nLIVE');
   const [fontSize, setFontSize] = useState(48);
   const [tracking, setTracking] = useState(0);
   const [facingMode, setFacingMode] = useState('user');
+  const [sourceMode, setSourceMode] = useState('camera'); // 'camera' | 'video'
   const inputTextRef = useRef('THEY\nLIVE');
   const fontSizeRef = useRef(48);
   const trackingRef = useRef(0);
   const facingModeRef = useRef('user');
+  const sourceModeRef = useRef('camera');
 
   useEffect(() => {
     inputTextRef.current = inputText;
@@ -70,6 +75,7 @@ export default function FingerDrawApp() {
   useEffect(() => { fontSizeRef.current = fontSize; }, [fontSize]);
   useEffect(() => { trackingRef.current = tracking; }, [tracking]);
   useEffect(() => { facingModeRef.current = facingMode; }, [facingMode]);
+  useEffect(() => { sourceModeRef.current = sourceMode; }, [sourceMode]);
 
   // Create offscreen canvas for text measurement
   useEffect(() => {
@@ -127,7 +133,8 @@ export default function FingerDrawApp() {
     } else {
       dh = ch; dw = ch * vAspect; ox = (cw - dw) / 2; oy = 0;
     }
-    const adjustedX = facingModeRef.current === 'user' ? 1 - lmX : lmX;
+    const shouldMirror = sourceModeRef.current === 'camera' && facingModeRef.current === 'user';
+    const adjustedX = shouldMirror ? 1 - lmX : lmX;
     return { x: adjustedX * dw + ox, y: lmY * dh + oy };
   }, []);
 
@@ -159,8 +166,9 @@ export default function FingerDrawApp() {
     return () => { cancelled = true; poseLandmarkerRef.current?.close(); };
   }, []);
 
-  // Start camera (restarts when facingMode changes)
+  // Start camera (restarts when facingMode changes, only in camera mode)
   useEffect(() => {
+    if (sourceMode !== 'camera') return;
     let cancelled = false;
     (async () => {
       if (streamRef.current) {
@@ -173,13 +181,55 @@ export default function FingerDrawApp() {
         });
         if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
         streamRef.current = stream;
-        if (videoRef.current) videoRef.current.srcObject = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.loop = false;
+        }
       } catch (e) {
         console.error('Camera error:', e);
       }
     })();
     return () => { cancelled = true; streamRef.current?.getTracks().forEach(t => t.stop()); };
-  }, [facingMode]);
+  }, [facingMode, sourceMode]);
+
+  // Handle video file source
+  const handleFileSelect = useCallback((e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    // Stop camera
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(t => t.stop());
+      streamRef.current = null;
+    }
+    // Revoke previous file URL
+    if (videoFileUrlRef.current) URL.revokeObjectURL(videoFileUrlRef.current);
+    const url = URL.createObjectURL(file);
+    videoFileUrlRef.current = url;
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+      videoRef.current.src = url;
+      videoRef.current.loop = true;
+      videoRef.current.play();
+    }
+    prevLandmarksRef.current = null;
+    setSourceMode('video');
+    // Reset file input so the same file can be re-selected
+    e.target.value = '';
+  }, []);
+
+  // Switch back to camera from video
+  const switchToCamera = useCallback(() => {
+    if (videoFileUrlRef.current) {
+      URL.revokeObjectURL(videoFileUrlRef.current);
+      videoFileUrlRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.src = '';
+      videoRef.current.srcObject = null;
+    }
+    prevLandmarksRef.current = null;
+    setSourceMode('camera');
+  }, []);
 
   // Init matter.js engine, walls, body collision circles
   useEffect(() => {
@@ -362,10 +412,12 @@ export default function FingerDrawApp() {
     container.setPointerCapture(e.pointerId);
     pointersRef.current.set(e.pointerId, pos);
 
+    const canGrab = sourceModeRef.current === 'camera';
+
     if (pointersRef.current.size === 1) {
-      const entry = findBodyAt(pos.x, pos.y);
+      const entry = canGrab ? findBodyAt(pos.x, pos.y) : null;
       if (entry) {
-        // Grab body
+        // Grab body (camera mode only)
         grabRef.current = {
           entry,
           offset: { x: pos.x - entry.body.position.x, y: pos.y - entry.body.position.y },
@@ -583,7 +635,7 @@ export default function FingerDrawApp() {
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
       >
-        <video ref={videoRef} autoPlay playsInline muted className={`fd-video${facingMode === 'user' ? ' fd-video-mirrored' : ''}`} />
+        <video ref={videoRef} autoPlay playsInline muted className={`fd-video${sourceMode === 'camera' && facingMode === 'user' ? ' fd-video-mirrored' : ''}`} />
         <div className="fd-grain" ref={grainRef} />
         <canvas ref={charCanvasRef} className="fd-char-canvas" />
 
@@ -616,7 +668,14 @@ export default function FingerDrawApp() {
                 value={tracking} onChange={e => setTracking(Number(e.target.value))} />
             </div>
           </div>
-          <button onClick={toggleCamera} className="fd-btn">&#x21C6;</button>
+          <input ref={fileInputRef} type="file" accept="video/*" hidden
+            onChange={handleFileSelect} />
+          <button onClick={() => fileInputRef.current?.click()} className="fd-btn">&#x1F4CE;</button>
+          {sourceMode === 'video' ? (
+            <button onClick={switchToCamera} className="fd-btn">CAM</button>
+          ) : (
+            <button onClick={toggleCamera} className="fd-btn">&#x21C6;</button>
+          )}
           <button onClick={clearAll} className="fd-btn">CLEAR</button>
         </div>
       </div>
