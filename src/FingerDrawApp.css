@@ -104,14 +104,18 @@
 .fd-text-input {
   flex: 1;
   min-width: 0;
-  padding: 10px 12px;
+  padding: 8px 12px;
   background: rgba(255, 255, 255, 0.08);
   color: #C8FF00;
   border: 1px solid rgba(255, 255, 255, 0.15);
   font-family: 'OTR Grotesk', sans-serif;
-  font-size: 16px;
+  font-size: 14px;
   letter-spacing: 0.06em;
   outline: none;
+  resize: none;
+  line-height: 1.4;
+  max-height: 80px;
+  overflow-y: auto;
 }
 
 .fd-text-input:focus {
@@ -122,7 +126,15 @@
   color: rgba(255, 255, 255, 0.3);
 }
 
-/* Font size control */
+/* Sliders wrapper */
+.fd-sliders {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* Size / tracking control */
 .fd-size-control {
   display: flex;
   align-items: center;

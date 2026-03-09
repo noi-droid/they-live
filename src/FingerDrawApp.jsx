@@ -20,10 +20,10 @@ const BODY_SEGMENTS = [
 const CIRCLES_PER_SEGMENT = 16;
 const SEGMENT_CIRCLE_RADIUS = 22;
 const HEAD_CIRCLE_RADIUS = 50;
-const MAX_CHARS = 200;
+const MAX_LINES = 50;
 const CHAR_COLOR = '#C8FF00';
 
-let nextCharId = 0;
+let nextLineId = 0;
 
 export default function FingerDrawApp() {
   const videoRef = useRef(null);
@@ -33,20 +33,23 @@ export default function FingerDrawApp() {
   const engineRef = useRef(null);
   const segmentCirclesRef = useRef([]);
   const headCircleRef = useRef(null);
-  const charBodiesRef = useRef([]);
+  const lineBodiesRef = useRef([]);
   const wallsRef = useRef([]);
   const animFrameRef = useRef(null);
   const streamRef = useRef(null);
   const containerSizeRef = useRef({ w: 0, h: 0 });
   const grainRef = useRef(null);
   const prevLandmarksRef = useRef(null);
+  const measureCtxRef = useRef(null);
 
   const [modelLoading, setModelLoading] = useState(true);
   const [inputText, setInputText] = useState('THEY LIVE');
   const [fontSize, setFontSize] = useState(48);
+  const [tracking, setTracking] = useState(0);
   const [facingMode, setFacingMode] = useState('user');
   const inputTextRef = useRef('THEY LIVE');
   const fontSizeRef = useRef(48);
+  const trackingRef = useRef(0);
   const facingModeRef = useRef('user');
 
   useEffect(() => {
@@ -58,8 +61,18 @@ export default function FingerDrawApp() {
   }, [fontSize]);
 
   useEffect(() => {
+    trackingRef.current = tracking;
+  }, [tracking]);
+
+  useEffect(() => {
     facingModeRef.current = facingMode;
   }, [facingMode]);
+
+  // Create offscreen canvas for text measurement
+  useEffect(() => {
+    const c = document.createElement('canvas');
+    measureCtxRef.current = c.getContext('2d');
+  }, []);
 
   // Ensure OTR Grotesk is loaded for canvas rendering
   useEffect(() => {
@@ -86,7 +99,20 @@ export default function FingerDrawApp() {
     }
   }, []);
 
-  // Convert normalized pose landmark coords to container CSS coords (mirrored)
+  // Measure line width with tracking
+  const measureLineWidth = useCallback((text, fs, trk) => {
+    const ctx = measureCtxRef.current;
+    if (!ctx) return fs * 0.6 * text.length;
+    ctx.font = `${fs}px 'OTR Grotesk', sans-serif`;
+    let width = 0;
+    for (let i = 0; i < text.length; i++) {
+      width += ctx.measureText(text[i]).width;
+      if (i < text.length - 1) width += trk;
+    }
+    return width;
+  }, []);
+
+  // Convert normalized pose landmark coords to container CSS coords
   const landmarkToCss = useCallback((lmX, lmY) => {
     const container = cameraWrapRef.current;
     const video = videoRef.current;
@@ -268,31 +294,34 @@ export default function FingerDrawApp() {
     }
   }, []);
 
-  // Drop characters at a given CSS position (tap-to-drop)
-  const dropCharsAt = useCallback((cx) => {
+  // Drop lines at a given CSS position (tap-to-drop)
+  const dropLinesAt = useCallback((cx) => {
     if (!engineRef.current) return;
-    const text = inputTextRef.current.replace(/\s/g, '');
-    if (!text.length) return;
+    const text = inputTextRef.current;
+    const lines = text.split('\n').filter(l => l.length > 0);
+    if (!lines.length) return;
     const { w: cw } = containerSizeRef.current;
     if (cw === 0) return;
 
     const fs = fontSizeRef.current;
-    const charW = fs * 0.6;
-    const totalW = text.length * charW;
-    const startX = cx - totalW / 2;
+    const trk = trackingRef.current;
+    const lineH = fs * 1.1;
 
-    for (let i = 0; i < text.length; i++) {
-      const char = text[i];
-      const charH = fs * 0.85;
-      const x = Math.max(charW / 2, Math.min(cw - charW / 2, startX + i * charW + charW / 2));
-      const y = -charH - Math.random() * 40;
+    for (let li = 0; li < lines.length; li++) {
+      const line = lines[li];
+      const lineW = measureLineWidth(line, fs, trk);
+      const bodyW = Math.max(lineW + fs * 0.3, fs);
+      const bodyH = lineH;
 
-      const body = Bodies.rectangle(x, y, charW, charH, {
+      const x = Math.max(bodyW / 2, Math.min(cw - bodyW / 2, cx));
+      const y = -bodyH - li * (lineH + 10) - Math.random() * 40;
+
+      const body = Bodies.rectangle(x, y, bodyW, bodyH, {
         restitution: 0.3,
         friction: 0.4,
         frictionAir: 0.002,
-        angle: (Math.random() - 0.5) * 0.3,
-        chamfer: { radius: Math.min(charW, charH) * 0.08 },
+        angle: (Math.random() - 0.5) * 0.15,
+        chamfer: { radius: Math.min(bodyW, bodyH) * 0.05 },
       });
 
       Body.setVelocity(body, {
@@ -301,24 +330,26 @@ export default function FingerDrawApp() {
       });
 
       Composite.add(engineRef.current.world, body);
-      charBodiesRef.current.push({ id: ++nextCharId, body, char, fontSize: fs });
+      lineBodiesRef.current.push({
+        id: ++nextLineId, body, text: line, fontSize: fs, tracking: trk,
+      });
     }
 
     // Remove excess (oldest first)
-    while (charBodiesRef.current.length > MAX_CHARS) {
-      const oldest = charBodiesRef.current.shift();
+    while (lineBodiesRef.current.length > MAX_LINES) {
+      const oldest = lineBodiesRef.current.shift();
       if (engineRef.current) Composite.remove(engineRef.current.world, oldest.body);
     }
-  }, []);
+  }, [measureLineWidth]);
 
-  // Handle tap on camera area to drop characters
+  // Handle tap on camera area to drop lines
   const handleTap = useCallback((e) => {
     const container = cameraWrapRef.current;
     if (!container) return;
     const cRect = container.getBoundingClientRect();
     const cx = e.clientX - cRect.left;
-    dropCharsAt(cx);
-  }, [dropCharsAt]);
+    dropLinesAt(cx);
+  }, [dropLinesAt]);
 
   // Main loop: physics + pose detection + canvas rendering
   useEffect(() => {
@@ -361,7 +392,7 @@ export default function FingerDrawApp() {
         }
       }
 
-      // Render characters on canvas
+      // Render lines on canvas
       const canvas = charCanvasRef.current;
       const { w: cw, h: ch } = containerSizeRef.current;
       if (canvas && cw > 0 && ch > 0) {
@@ -378,17 +409,35 @@ export default function FingerDrawApp() {
         ctx.save();
         ctx.scale(dpr, dpr);
 
-        for (const c of charBodiesRef.current) {
-          const { x, y } = c.body.position;
-          const angle = c.body.angle;
+        for (const line of lineBodiesRef.current) {
+          const { x, y } = line.body.position;
+          const angle = line.body.angle;
           ctx.save();
           ctx.translate(x, y);
           ctx.rotate(angle);
-          ctx.font = `${c.fontSize}px 'OTR Grotesk', sans-serif`;
+          ctx.font = `${line.fontSize}px 'OTR Grotesk', sans-serif`;
           ctx.fillStyle = CHAR_COLOR;
-          ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
-          ctx.fillText(c.char, 0, 0);
+          ctx.textAlign = 'left';
+
+          // Measure char widths for tracking layout
+          const chars = line.text;
+          const trk = line.tracking;
+          let totalW = 0;
+          const charWidths = [];
+          for (let i = 0; i < chars.length; i++) {
+            const w = ctx.measureText(chars[i]).width;
+            charWidths.push(w);
+            totalW += w;
+            if (i < chars.length - 1) totalW += trk;
+          }
+
+          let drawX = -totalW / 2;
+          for (let i = 0; i < chars.length; i++) {
+            ctx.fillText(chars[i], drawX, 0);
+            drawX += charWidths[i] + trk;
+          }
+
           ctx.restore();
         }
 
@@ -410,14 +459,14 @@ export default function FingerDrawApp() {
     prevLandmarksRef.current = null;
   }, []);
 
-  // Clear all characters
+  // Clear all lines
   const clearAll = useCallback(() => {
     if (engineRef.current) {
-      for (const c of charBodiesRef.current) {
-        Composite.remove(engineRef.current.world, c.body);
+      for (const line of lineBodiesRef.current) {
+        Composite.remove(engineRef.current.world, line.body);
       }
     }
-    charBodiesRef.current = [];
+    lineBodiesRef.current = [];
   }, []);
 
   return (
@@ -436,23 +485,36 @@ export default function FingerDrawApp() {
       </div>
 
       <div className="fd-controls">
-        <input
-          type="text"
+        <textarea
           className="fd-text-input"
           value={inputText}
           onChange={e => setInputText(e.target.value)}
-          placeholder="Enter text..."
+          placeholder="Enter text (one line per body)..."
+          rows={inputText.split('\n').length || 1}
         />
-        <div className="fd-size-control">
-          <span className="fd-size-label">{fontSize}px</span>
-          <input
-            type="range"
-            className="fd-size-slider"
-            min="24"
-            max="400"
-            value={fontSize}
-            onChange={e => setFontSize(Number(e.target.value))}
-          />
+        <div className="fd-sliders">
+          <div className="fd-size-control">
+            <span className="fd-size-label">{fontSize}px</span>
+            <input
+              type="range"
+              className="fd-size-slider"
+              min="24"
+              max="400"
+              value={fontSize}
+              onChange={e => setFontSize(Number(e.target.value))}
+            />
+          </div>
+          <div className="fd-size-control">
+            <span className="fd-size-label">{tracking > 0 ? '+' : ''}{tracking}</span>
+            <input
+              type="range"
+              className="fd-size-slider"
+              min="-20"
+              max="100"
+              value={tracking}
+              onChange={e => setTracking(Number(e.target.value))}
+            />
+          </div>
         </div>
         <button onClick={toggleCamera} className="fd-btn">
           &#x21C6;
