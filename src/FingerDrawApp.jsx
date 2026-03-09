@@ -3,7 +3,7 @@ import { PoseLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
 import Matter from 'matter-js';
 import './FingerDrawApp.css';
 
-const { Engine, Bodies, Body, Composite, Query } = Matter;
+const { Engine, Bodies, Body, Composite } = Matter;
 
 // Body landmark pairs for collision segments
 const BODY_SEGMENTS = [
@@ -23,15 +23,6 @@ const HEAD_CIRCLES_COUNT = 9;
 const HEAD_CIRCLE_R = 22;
 const MAX_LINES = 50;
 const CHAR_COLOR = '#C8FF00';
-
-// Camera-based pinch detection — scale-relative thresholds
-// Ratios are relative to hand size (wrist→index distance)
-const PINCH_GRAB_RATIO = 0.42;   // thumb-index / hand-size to start grab
-const PINCH_RELEASE_RATIO = 0.60; // must open wider to release (hysteresis)
-const PINCH_CONFIRM_FRAMES = 3;  // consecutive pinch frames before grab triggers
-const PINCH_MIN_HAND = 0.03;     // min hand size (normalised) — ignore if too far
-const PINCH_HIT_RADIUS = 60;     // CSS-px radius for body hit-test around pinch point
-const PINCH_FOLLOW = 0.45;       // lerp factor — 0 = frozen, 1 = instant snap
 
 // Build default text from current Tokyo date/time
 function buildDefaultText() {
@@ -66,13 +57,6 @@ export default function FingerDrawApp() {
   const prevLandmarksRef = useRef(null);
   const measureCtxRef = useRef(null);
   const dropIndexRef = useRef(0);
-
-  // Camera-based pinch state for each hand
-  // { grabbing: false, entry: null, prevPos: null, vel: { x: 0, y: 0 } }
-  const pinchStateRef = useRef({
-    left:  { grabbing: false, entry: null, prevPos: null, vel: { x: 0, y: 0 }, frames: 0 },
-    right: { grabbing: false, entry: null, prevPos: null, vel: { x: 0, y: 0 }, frames: 0 },
-  });
 
   const fileInputRef = useRef(null);
   const videoFileUrlRef = useRef(null);
@@ -412,145 +396,6 @@ export default function FingerDrawApp() {
     }
   }, [measureLineWidth]);
 
-  // ── Camera-based pinch detection (runs inside main loop) ──
-
-  const findBodyNear = useCallback((px, py) => {
-    // Hit-test: try exact point first, then expand search radius
-    const allBodies = lineBodiesRef.current.map(l => l.body);
-    const hits = Query.point(allBodies, { x: px, y: py });
-    if (hits.length) return lineBodiesRef.current.find(l => l.body === hits[0]) || null;
-
-    // Expanded search: check if any body center is within PINCH_HIT_RADIUS
-    let best = null, bestDist = PINCH_HIT_RADIUS;
-    for (const line of lineBodiesRef.current) {
-      const d = Math.hypot(line.body.position.x - px, line.body.position.y - py);
-      if (d < bestDist) { bestDist = d; best = line; }
-    }
-    return best;
-  }, []);
-
-  const updatePinchForHand = useCallback((hand, smoothed) => {
-    const state = pinchStateRef.current[hand];
-    const isLeft = hand === 'left';
-
-    // Landmark indices: left 19/21/15/13/23, right 20/22/16/14/24
-    const indexLm  = smoothed[isLeft ? 19 : 20];
-    const thumbLm  = smoothed[isLeft ? 21 : 22];
-    const wristLm  = smoothed[isLeft ? 15 : 16];
-    const elbowLm  = smoothed[isLeft ? 13 : 14];
-    const hipLm    = smoothed[isLeft ? 23 : 24];
-
-    const releasePinch = () => {
-      if (state.grabbing && state.entry) {
-        Body.setStatic(state.entry.body, false);
-        Body.setVelocity(state.entry.body, {
-          x: state.vel.x * 0.5, y: state.vel.y * 0.5,
-        });
-      }
-      state.grabbing = false;
-      state.entry = null;
-      state.prevPos = null;
-      state.vel = { x: 0, y: 0 };
-      state.frames = 0;
-    };
-
-    if (!indexLm || !thumbLm || !wristLm) { releasePinch(); return; }
-
-    const visOk = (indexLm.visibility ?? 0) > 0.3
-      && (thumbLm.visibility ?? 0) > 0.3
-      && (wristLm.visibility ?? 0) > 0.2;
-    if (!visOk) { releasePinch(); return; }
-
-    // Hand size = wrist→index distance (scales with camera distance)
-    const handSize = Math.hypot(indexLm.x - wristLm.x, indexLm.y - wristLm.y);
-    if (handSize < PINCH_MIN_HAND) { releasePinch(); return; }
-
-    // ── Resting-arm filter ──
-    // If wrist is below elbow (arm hanging down), skip pinch detection.
-    // In normalised coords, larger Y = lower on screen.
-    if (!state.grabbing && elbowLm && (elbowLm.visibility ?? 0) > 0.3) {
-      const wristBelowElbow = wristLm.y - elbowLm.y;
-      if (wristBelowElbow > handSize * 0.6) {
-        state.frames = 0;
-        return;
-      }
-    }
-    // Also skip if wrist is very close to the hip (arm resting at side)
-    if (!state.grabbing && hipLm && (hipLm.visibility ?? 0) > 0.3) {
-      const wristToHip = Math.hypot(wristLm.x - hipLm.x, wristLm.y - hipLm.y);
-      if (wristToHip < handSize * 1.2) {
-        state.frames = 0;
-        return;
-      }
-    }
-
-    // Dynamic thresholds relative to hand size
-    const grabDist = handSize * PINCH_GRAB_RATIO;
-    const releaseDist = handSize * PINCH_RELEASE_RATIO;
-
-    // More confirm frames needed when hand is smaller (farther from camera)
-    const confirmNeeded = handSize < 0.06 ? PINCH_CONFIRM_FRAMES + 3 : PINCH_CONFIRM_FRAMES;
-
-    // Normalised distance between thumb and index
-    const dist = Math.hypot(thumbLm.x - indexLm.x, thumbLm.y - indexLm.y);
-    // Midpoint in CSS coords
-    const mid = landmarkToCss(
-      (indexLm.x + thumbLm.x) / 2,
-      (indexLm.y + thumbLm.y) / 2,
-    );
-
-    if (!state.grabbing) {
-      // Check if pinching — require consecutive frames to avoid false positives
-      if (dist < grabDist) {
-        state.frames++;
-        if (state.frames >= confirmNeeded) {
-          const entry = findBodyNear(mid.x, mid.y);
-          if (entry) {
-            // Don't steal from other hand
-            const other = hand === 'left' ? 'right' : 'left';
-            if (pinchStateRef.current[other].entry === entry) return;
-
-            state.grabbing = true;
-            state.entry = entry;
-            state.prevPos = mid;
-            state.vel = { x: 0, y: 0 };
-            Body.setStatic(entry.body, true);
-            Body.setVelocity(entry.body, { x: 0, y: 0 });
-          }
-        }
-      } else {
-        state.frames = 0; // reset if fingers open
-      }
-    } else {
-      // Currently grabbing
-      if (dist > releaseDist) {
-        // Release — throw with velocity
-        if (state.entry) {
-          Body.setStatic(state.entry.body, false);
-          Body.setVelocity(state.entry.body, {
-            x: state.vel.x * 0.5, y: state.vel.y * 0.5,
-          });
-        }
-        state.grabbing = false;
-        state.entry = null;
-        state.prevPos = null;
-        state.vel = { x: 0, y: 0 };
-      } else {
-        // Move body smoothly toward pinch midpoint (lerp)
-        if (state.entry) {
-          const bx = state.entry.body.position.x;
-          const by = state.entry.body.position.y;
-          const nx = bx + (mid.x - bx) * PINCH_FOLLOW;
-          const ny = by + (mid.y - by) * PINCH_FOLLOW;
-          Body.setPosition(state.entry.body, { x: nx, y: ny });
-          // Velocity based on actual body movement (for throw)
-          state.vel = { x: nx - bx, y: ny - by };
-          state.prevPos = mid;
-        }
-      }
-    }
-  }, [landmarkToCss, findBodyNear]);
-
   // Main loop: physics + pose detection + canvas rendering
   useEffect(() => {
     if (modelLoading) return;
@@ -579,26 +424,9 @@ export default function FingerDrawApp() {
           });
           prevLandmarksRef.current = smoothed.map(l => ({ x: l.x, y: l.y, visibility: l.visibility }));
           updateBodyFromPose(smoothed);
-
-          // Camera-based pinch detection (camera mode only)
-          if (sourceModeRef.current === 'camera') {
-            updatePinchForHand('left',  smoothed);
-            updatePinchForHand('right', smoothed);
-          }
         } else {
           hideBody();
           prevLandmarksRef.current = null;
-          // Release any pinch grabs when pose lost
-          for (const hand of ['left', 'right']) {
-            const ps = pinchStateRef.current[hand];
-            if (ps.grabbing && ps.entry) {
-              Body.setStatic(ps.entry.body, false);
-            }
-            ps.grabbing = false;
-            ps.entry = null;
-            ps.prevPos = null;
-            ps.vel = { x: 0, y: 0 };
-          }
         }
       }
 
@@ -647,28 +475,6 @@ export default function FingerDrawApp() {
           }
           ctx.restore();
         }
-
-        // Draw pinch indicators
-        for (const hand of ['left', 'right']) {
-          const ps = pinchStateRef.current[hand];
-          if (ps.grabbing && ps.prevPos) {
-            ctx.save();
-            ctx.strokeStyle = CHAR_COLOR;
-            ctx.lineWidth = 2;
-            ctx.globalAlpha = 0.7;
-            ctx.beginPath();
-            ctx.arc(ps.prevPos.x, ps.prevPos.y, 18, 0, Math.PI * 2);
-            ctx.stroke();
-            // Inner dot
-            ctx.fillStyle = CHAR_COLOR;
-            ctx.globalAlpha = 0.4;
-            ctx.beginPath();
-            ctx.arc(ps.prevPos.x, ps.prevPos.y, 5, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.restore();
-          }
-        }
-
         ctx.restore();
       }
 
@@ -677,7 +483,7 @@ export default function FingerDrawApp() {
 
     animFrameRef.current = requestAnimationFrame(loop);
     return () => { if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current); };
-  }, [modelLoading, updateBodyFromPose, hideBody, updatePinchForHand]);
+  }, [modelLoading, updateBodyFromPose, hideBody]);
 
   // Toggle camera facing mode
   const toggleCamera = useCallback(() => {
@@ -685,16 +491,8 @@ export default function FingerDrawApp() {
     prevLandmarksRef.current = null;
   }, []);
 
-  // Clear all lines (also release any pinch grabs)
+  // Clear all lines
   const clearAll = useCallback(() => {
-    for (const hand of ['left', 'right']) {
-      const ps = pinchStateRef.current[hand];
-      ps.grabbing = false;
-      ps.entry = null;
-      ps.prevPos = null;
-      ps.vel = { x: 0, y: 0 };
-      ps.frames = 0;
-    }
     if (engineRef.current) {
       for (const line of lineBodiesRef.current) Composite.remove(engineRef.current.world, line.body);
     }
