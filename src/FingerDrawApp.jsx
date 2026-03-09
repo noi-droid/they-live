@@ -24,9 +24,10 @@ const HEAD_CIRCLE_R = 22;
 const MAX_LINES = 50;
 const CHAR_COLOR = '#C8FF00';
 
-// Camera-based pinch detection thresholds (normalised landmark distance)
-const PINCH_GRAB_DIST = 0.07;    // thumb-index distance to start grab
-const PINCH_RELEASE_DIST = 0.15; // hysteresis — must open wider to release
+// Camera-based pinch detection — scale-relative thresholds
+// Ratios are relative to hand size (wrist→index distance)
+const PINCH_GRAB_RATIO = 0.35;   // thumb-index / hand-size to start grab
+const PINCH_RELEASE_RATIO = 0.55; // must open wider to release (hysteresis)
 const PINCH_HIT_RADIUS = 60;     // CSS-px radius for body hit-test around pinch point
 const PINCH_FOLLOW = 0.45;       // lerp factor — 0 = frozen, 1 = instant snap
 
@@ -426,25 +427,10 @@ export default function FingerDrawApp() {
     return best;
   }, []);
 
-  const updatePinchForHand = useCallback((hand, indexLm, thumbLm, smoothed) => {
+  const updatePinchForHand = useCallback((hand, indexLm, thumbLm, wristLm) => {
     const state = pinchStateRef.current[hand];
-    if (!indexLm || !thumbLm) {
-      // Hand not visible → release if grabbing
-      if (state.grabbing && state.entry) {
-        Body.setStatic(state.entry.body, false);
-        Body.setVelocity(state.entry.body, {
-          x: state.vel.x * 0.5, y: state.vel.y * 0.5,
-        });
-      }
-      state.grabbing = false;
-      state.entry = null;
-      state.prevPos = null;
-      state.vel = { x: 0, y: 0 };
-      return;
-    }
 
-    const visOk = (indexLm.visibility ?? 0) > 0.3 && (thumbLm.visibility ?? 0) > 0.3;
-    if (!visOk) {
+    const releasePinch = () => {
       if (state.grabbing && state.entry) {
         Body.setStatic(state.entry.body, false);
         Body.setVelocity(state.entry.body, {
@@ -455,8 +441,22 @@ export default function FingerDrawApp() {
       state.entry = null;
       state.prevPos = null;
       state.vel = { x: 0, y: 0 };
-      return;
-    }
+    };
+
+    if (!indexLm || !thumbLm || !wristLm) { releasePinch(); return; }
+
+    const visOk = (indexLm.visibility ?? 0) > 0.3
+      && (thumbLm.visibility ?? 0) > 0.3
+      && (wristLm.visibility ?? 0) > 0.2;
+    if (!visOk) { releasePinch(); return; }
+
+    // Hand size = wrist→index distance (scales with camera distance)
+    const handSize = Math.hypot(indexLm.x - wristLm.x, indexLm.y - wristLm.y);
+    if (handSize < 0.01) { releasePinch(); return; } // too small to be reliable
+
+    // Dynamic thresholds relative to hand size
+    const grabDist = handSize * PINCH_GRAB_RATIO;
+    const releaseDist = handSize * PINCH_RELEASE_RATIO;
 
     // Normalised distance between thumb and index
     const dist = Math.hypot(thumbLm.x - indexLm.x, thumbLm.y - indexLm.y);
@@ -468,7 +468,7 @@ export default function FingerDrawApp() {
 
     if (!state.grabbing) {
       // Check if pinching
-      if (dist < PINCH_GRAB_DIST) {
+      if (dist < grabDist) {
         const entry = findBodyNear(mid.x, mid.y);
         if (entry) {
           // Don't steal from other hand
@@ -485,7 +485,7 @@ export default function FingerDrawApp() {
       }
     } else {
       // Currently grabbing
-      if (dist > PINCH_RELEASE_DIST) {
+      if (dist > releaseDist) {
         // Release — throw with velocity
         if (state.entry) {
           Body.setStatic(state.entry.body, false);
@@ -544,8 +544,8 @@ export default function FingerDrawApp() {
 
           // Camera-based pinch detection (camera mode only)
           if (sourceModeRef.current === 'camera') {
-            updatePinchForHand('left',  smoothed[19], smoothed[21], smoothed);
-            updatePinchForHand('right', smoothed[20], smoothed[22], smoothed);
+            updatePinchForHand('left',  smoothed[19], smoothed[21], smoothed[15]);
+            updatePinchForHand('right', smoothed[20], smoothed[22], smoothed[16]);
           }
         } else {
           hideBody();
