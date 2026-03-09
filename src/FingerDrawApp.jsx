@@ -26,10 +26,10 @@ const CHAR_COLOR = '#C8FF00';
 
 // Camera-based pinch detection — scale-relative thresholds
 // Ratios are relative to hand size (wrist→index distance)
-const PINCH_GRAB_RATIO = 0.28;   // thumb-index / hand-size to start grab
-const PINCH_RELEASE_RATIO = 0.55; // must open wider to release (hysteresis)
-const PINCH_CONFIRM_FRAMES = 4;  // consecutive pinch frames before grab triggers
-const PINCH_MIN_HAND = 0.04;     // min hand size (normalised) — ignore if too far
+const PINCH_GRAB_RATIO = 0.42;   // thumb-index / hand-size to start grab
+const PINCH_RELEASE_RATIO = 0.60; // must open wider to release (hysteresis)
+const PINCH_CONFIRM_FRAMES = 3;  // consecutive pinch frames before grab triggers
+const PINCH_MIN_HAND = 0.03;     // min hand size (normalised) — ignore if too far
 const PINCH_HIT_RADIUS = 60;     // CSS-px radius for body hit-test around pinch point
 const PINCH_FOLLOW = 0.45;       // lerp factor — 0 = frozen, 1 = instant snap
 
