@@ -253,6 +253,24 @@ function cmdsToSvgPath(cmds, tf) {
   }
   return d;
 }
+// One Euro filter (Casiez et al. 2012): steady when the hand is still, little lag when it moves
+class OneEuro {
+  constructor(minCutoff = 1.2, beta = 0.015, dCutoff = 1.0) {
+    this.minCutoff = minCutoff; this.beta = beta; this.dCutoff = dCutoff;
+    this.x = null; this.dx = 0; this.t = null;
+  }
+  static alpha(cutoff, dt) { const r = 2 * Math.PI * cutoff * dt; return r / (r + 1); }
+  filter(v, t) {
+    if (this.x === null || this.t === null || t <= this.t) { this.x = v; this.t = t; return v; }
+    const dt = t - this.t; this.t = t;
+    const dv = (v - this.x) / dt;
+    this.dx += OneEuro.alpha(this.dCutoff, dt) * (dv - this.dx);
+    const cutoff = this.minCutoff + this.beta * Math.abs(this.dx);
+    this.x += OneEuro.alpha(cutoff, dt) * (v - this.x);
+    return this.x;
+  }
+}
+const HAND_FILTER_RESET_MS = 300; // forget a hand's filter state after it has been gone this long
 const TRACE_MIN_DIST = 4; // min px between trail points
 const TRACE_PINCH_CLOSE = 40; // px — thumb+index touching
 const TRACE_PINCH_OPEN = 70;  // px — thumb+index separated
@@ -291,6 +309,7 @@ export default function FingerDrawApp() {
   const meshRef = useRef(null);   // mesh mode data
   const latestHandsRef = useRef(null); // last detected hands, container CSS coords
   const deskRef = useRef(null); // desk mode: letter bodies + hand colliders
+  const handFiltersRef = useRef({}); // per-hand (Left/Right) One Euro filters for the 21 landmarks
   const underHandsRef = useRef(true);
   const grainCanvasRef = useRef(null); // grain texture for compositing
   const recordCanvasRef = useRef(null);
@@ -1023,8 +1042,14 @@ export default function FingerDrawApp() {
           });
           prevLandmarksRef.current = smoothed.map(l => ({ x: l.x, y: l.y, visibility: l.visibility }));
           updateBodyFromPose(smoothed);
+        } else {
+          hideBody();
+          prevLandmarksRef.current = null;
+        }
 
-          // Hand detection for trace + mesh modes
+        {
+          // Hand detection (trace / mesh / desk). Runs whether or not a body pose was
+          // found, so hands seen from above over a desk are still tracked.
           if ((mode === 'trace' || mode === 'mesh' || mode === 'desk') && handLandmarkerRef.current) {
             const handRes = handLandmarkerRef.current.detectForVideo(video, now);
             const numHands = handRes.landmarks?.length || 0;
@@ -1043,7 +1068,22 @@ export default function FingerDrawApp() {
                 debugDots.push(landmarkToCss(h[HAND_INDEX_TIP].x, h[HAND_INDEX_TIP].y));
               }
               traceDebugRef.current = debugDots;
-              latestHandsRef.current = handRes.landmarks.map(h => h.map(l => landmarkToCss(l.x, l.y)));
+              // smooth each hand's landmarks, keyed by handedness so filters follow the right hand
+              const tSec = now / 1000, filters = handFiltersRef.current, used = new Set();
+              latestHandsRef.current = handRes.landmarks.map((h, hi) => {
+                let key = handRes.handedness?.[hi]?.[0]?.categoryName || `h${hi}`;
+                if (used.has(key)) key += `_${hi}`;
+                used.add(key);
+                let f = filters[key];
+                if (!f || now - f.last > HAND_FILTER_RESET_MS) {
+                  f = filters[key] = { pts: h.map(() => [new OneEuro(), new OneEuro()]), last: now };
+                }
+                f.last = now;
+                return h.map((l, i) => {
+                  const c = landmarkToCss(l.x, l.y);
+                  return { x: f.pts[i][0].filter(c.x, tSec), y: f.pts[i][1].filter(c.y, tSec) };
+                });
+              });
 
               // --- Trace mode (first hand only) ---
               if (mode === 'trace') {
@@ -1133,10 +1173,6 @@ export default function FingerDrawApp() {
               }
             }
           }
-        } else {
-          hideBody();
-          prevLandmarksRef.current = null;
-          latestHandsRef.current = null;
         }
 
         // Face detection (zoom-out for close-up faces) → wink → color change
