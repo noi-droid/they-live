@@ -127,6 +127,12 @@ function deformPt(mp, tris, bodies) {
     y: mp.w[0] * bodies[a].position.y + mp.w[1] * bodies[b].position.y + mp.w[2] * bodies[c].position.y,
   };
 }
+// MediaPipe hand skeleton (21 landmarks) for the SVG guide layer
+const HAND_CONNECTIONS = [
+  [0, 1], [1, 2], [2, 3], [3, 4], [0, 5], [5, 6], [6, 7], [7, 8],
+  [5, 9], [9, 10], [10, 11], [11, 12], [9, 13], [13, 14], [14, 15], [15, 16],
+  [13, 17], [0, 17], [17, 18], [18, 19], [19, 20],
+];
 const TRACE_MIN_DIST = 4; // min px between trail points
 const TRACE_PINCH_CLOSE = 40; // px — thumb+index touching
 const TRACE_PINCH_OPEN = 70;  // px — thumb+index separated
@@ -163,6 +169,7 @@ export default function FingerDrawApp() {
   const traceDebugRef = useRef(null); // debug landmark positions
   const otFontRef = useRef(null); // opentype.js font
   const meshRef = useRef(null);   // mesh mode data
+  const latestHandsRef = useRef(null); // last detected hands, container CSS coords
   const grainCanvasRef = useRef(null); // grain texture for compositing
   const recordCanvasRef = useRef(null);
   const recordCtxRef = useRef(null);
@@ -196,6 +203,8 @@ export default function FingerDrawApp() {
   const [inputText, setInputText] = useState(DEFAULT_TEXT);
   const [fontSize, setFontSize] = useState(48);
   const [tracking, setTracking] = useState(0);
+  const [leading, setLeading] = useState(1.3);
+  const [videoPaused, setVideoPaused] = useState(false);
   const [facingMode, setFacingMode] = useState('user');
   const [sourceMode, setSourceMode] = useState('camera'); // 'camera' | 'video'
   const [displayMode, setDisplayMode] = useState('fall'); // 'fall' | 'gaze'
@@ -208,6 +217,7 @@ export default function FingerDrawApp() {
   const inputTextRef = useRef(DEFAULT_TEXT);
   const fontSizeRef = useRef(48);
   const trackingRef = useRef(0);
+  const leadingRef = useRef(1.3);
   const facingModeRef = useRef('user');
   const sourceModeRef = useRef('camera');
   const displayModeRef = useRef('fall');
@@ -220,6 +230,7 @@ export default function FingerDrawApp() {
 
   useEffect(() => { fontSizeRef.current = fontSize; }, [fontSize]);
   useEffect(() => { trackingRef.current = tracking; }, [tracking]);
+  useEffect(() => { leadingRef.current = leading; }, [leading]);
   useEffect(() => { facingModeRef.current = facingMode; }, [facingMode]);
   useEffect(() => { sourceModeRef.current = sourceMode; }, [sourceMode]);
   useEffect(() => { displayModeRef.current = displayMode; }, [displayMode]);
@@ -412,6 +423,7 @@ export default function FingerDrawApp() {
       videoRef.current.play();
     }
     prevLandmarksRef.current = null;
+    setVideoPaused(false);
     setSourceMode('video');
     // Reset file input so the same file can be re-selected
     e.target.value = '';
@@ -697,6 +709,7 @@ export default function FingerDrawApp() {
                 debugDots.push(landmarkToCss(h[HAND_INDEX_TIP].x, h[HAND_INDEX_TIP].y));
               }
               traceDebugRef.current = debugDots;
+              latestHandsRef.current = handRes.landmarks.map(h => h.map(l => landmarkToCss(l.x, l.y)));
 
               // --- Trace mode (first hand only) ---
               if (mode === 'trace') {
@@ -769,6 +782,7 @@ export default function FingerDrawApp() {
               }
             } else {
               traceDebugRef.current = null;
+              latestHandsRef.current = null;
               // Release all grabs if no hands detected
               if (mode === 'mesh' && meshRef.current?.grabs) {
                 for (const g of Object.values(meshRef.current.grabs)) {
@@ -781,6 +795,7 @@ export default function FingerDrawApp() {
         } else {
           hideBody();
           prevLandmarksRef.current = null;
+          latestHandsRef.current = null;
         }
 
         // Face detection (zoom-out for close-up faces) → wink → color change
@@ -1021,7 +1036,7 @@ export default function FingerDrawApp() {
     const trk = trackingRef.current;
     const { w: cw, h: ch } = containerSizeRef.current;
     const scale = fs / font.unitsPerEm;
-    const lineH = fs * 1.3;
+    const lineH = fs * leadingRef.current;
     const maxW = cw * 0.85;
     const spaceW = (font.charToGlyph(' ').advanceWidth || 250) * scale + trk;
 
@@ -1108,6 +1123,72 @@ export default function FingerDrawApp() {
     meshRef.current = { restVerts, bodies, constraints: [...constraints, ...pins], tris, pathMap, grabs: {} };
   }, []);
   useEffect(() => { initMeshRef.current = initMesh; }, [initMesh]);
+
+  // Rebuild the mesh when text or type settings change (debounced)
+  useEffect(() => {
+    if (displayModeRef.current !== 'mesh') return;
+    const id = setTimeout(() => initMeshRef.current?.(), 250);
+    return () => clearTimeout(id);
+  }, [inputText, fontSize, tracking, leading]);
+
+  // Export the deformed mesh text as SVG, in the source video's own pixel space
+  // (visual orientation), so it can be laid over a full-resolution frame of the same footage.
+  const exportSvg = useCallback(() => {
+    const m = meshRef.current;
+    const video = videoRef.current;
+    const container = cameraWrapRef.current;
+    if (!m || !video || !video.videoWidth || !container) return;
+    const { width: cw, height: ch } = container.getBoundingClientRect();
+    const vidW = video.videoWidth, vidH = video.videoHeight;
+    let dw, dh, ox, oy;
+    if (cw / ch > vidW / vidH) { dw = cw; dh = cw / (vidW / vidH); ox = 0; oy = (ch - dh) / 2; }
+    else { dh = ch; dw = ch * (vidW / vidH); ox = (cw - dw) / 2; oy = 0; }
+    const toV = p => [((p.x - ox) / dw) * vidW, ((p.y - oy) / dh) * vidH];
+    const f = n => n.toFixed(2);
+
+    let d = '';
+    for (const cmd of m.pathMap) {
+      const pts = cmd.pts.map(p => toV(deformPt(p, m.tris, m.bodies)));
+      switch (cmd.type) {
+        case 'M': d += `M${f(pts[0][0])} ${f(pts[0][1])}`; break;
+        case 'L': d += `L${f(pts[0][0])} ${f(pts[0][1])}`; break;
+        case 'Q': d += `Q${f(pts[0][0])} ${f(pts[0][1])} ${f(pts[1][0])} ${f(pts[1][1])}`; break;
+        case 'C': d += `C${f(pts[0][0])} ${f(pts[0][1])} ${f(pts[1][0])} ${f(pts[1][1])} ${f(pts[2][0])} ${f(pts[2][1])}`; break;
+        case 'Z': d += 'Z'; break;
+      }
+    }
+
+    let guide = '';
+    const hands = latestHandsRef.current;
+    if (hands?.length) {
+      const sw = Math.max(1, vidW / 600), r = Math.max(2, vidW / 300);
+      for (const h of hands) {
+        const v = h.map(toV);
+        for (const [a, b] of HAND_CONNECTIONS)
+          guide += `<line x1="${f(v[a][0])}" y1="${f(v[a][1])}" x2="${f(v[b][0])}" y2="${f(v[b][1])}" stroke-width="${f(sw)}"/>`;
+        for (const p of v) guide += `<circle cx="${f(p[0])}" cy="${f(p[1])}" r="${f(r)}" stroke="none" fill="#00E5FF"/>`;
+      }
+    }
+
+    const isVideo = sourceModeRef.current === 'video';
+    const t = video.currentTime;
+    const color = COLOR_PALETTE[charColorRef.current];
+    const svg = `<?xml version="1.0" encoding="UTF-8"?>
+<!-- they-live mesh export | source: ${isVideo ? 'video file' : 'camera'} ${vidW}x${vidH}${isVideo ? ` | time: ${t.toFixed(3)}s` : ''} -->
+<svg xmlns="http://www.w3.org/2000/svg" width="${vidW}" height="${vidH}" viewBox="0 0 ${vidW} ${vidH}">
+  <g id="type"><path d="${d}" fill="${color}"/></g>
+  <g id="hand-guide" fill="none" stroke="#00E5FF" opacity="0.8">${guide}</g>
+</svg>
+`;
+    const name = isVideo ? `they-live-mesh_t${t.toFixed(3)}s.svg` : `they-live-mesh_${Date.now()}.svg`;
+    downloadBlob(new Blob([svg], { type: 'image/svg+xml' }), name);
+  }, []);
+
+  const togglePause = useCallback(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    if (v.paused) { v.play(); setVideoPaused(false); } else { v.pause(); setVideoPaused(true); }
+  }, []);
 
   // Cycle display mode: fall → gaze → trace → mesh → fall
   const toggleDisplayMode = useCallback(() => {
@@ -1326,6 +1407,11 @@ export default function FingerDrawApp() {
               <input type="range" className="fd-size-slider" min="-20" max="100"
                 value={tracking} onChange={e => setTracking(Number(e.target.value))} />
             </div>
+            <div className="fd-size-control">
+              <span className="fd-size-label">{leading.toFixed(2)}</span>
+              <input type="range" className="fd-size-slider" min="0.7" max="2.5" step="0.05"
+                value={leading} onChange={e => setLeading(Number(e.target.value))} />
+            </div>
           </div>
           <input ref={fileInputRef} type="file" accept="video/*" hidden
             onChange={handleFileSelect} />
@@ -1363,6 +1449,14 @@ export default function FingerDrawApp() {
           <button onClick={toggleGif} className={`fd-btn${gifRecording ? ' fd-btn-rec' : ''}`}>
             {gifRecording ? '■ GIF' : 'GIF'}
           </button>
+          {sourceMode === 'video' && (
+            <button onClick={togglePause} className={`fd-btn${videoPaused ? ' fd-btn-active' : ''}`}>
+              {videoPaused ? '▶' : '❚❚'}
+            </button>
+          )}
+          {displayMode === 'mesh' && (
+            <button onClick={exportSvg} className="fd-btn">SVG</button>
+          )}
         </div>
       </div>
     </div>
