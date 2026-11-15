@@ -414,6 +414,10 @@ export default function FingerDrawApp() {
               delegate: 'GPU',
             },
             numHands: 2,
+            // lower than the 0.5 defaults so a hand held side-on (palms facing each other) is still found
+            minHandDetectionConfidence: 0.3,
+            minHandPresenceConfidence: 0.3,
+            minTrackingConfidence: 0.3,
             runningMode: 'VIDEO',
           }),
         ]);
@@ -1095,6 +1099,19 @@ export default function FingerDrawApp() {
           }
           ctx.fillStyle = color;
           ctx.fill();
+        }
+
+        // Mesh mode: faint skeleton for every detected hand, so you can see whether both are found
+        if (mode === 'mesh' && latestHandsRef.current) {
+          ctx.save();
+          ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+          ctx.lineWidth = 1;
+          for (const h of latestHandsRef.current) {
+            ctx.beginPath();
+            for (const [a, b] of HAND_CONNECTIONS) { ctx.moveTo(h[a].x, h[a].y); ctx.lineTo(h[b].x, h[b].y); }
+            ctx.stroke();
+          }
+          ctx.restore();
         }
 
         // Debug: show thumb + index finger dots for all hands
