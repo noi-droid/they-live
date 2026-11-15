@@ -133,9 +133,11 @@ const HAND_CONNECTIONS = [
   [5, 9], [9, 10], [10, 11], [11, 12], [9, 13], [13, 14], [14, 15], [15, 16],
   [13, 17], [0, 17], [17, 18], [18, 19], [19, 20],
 ];
-// Fist detection: mean fingertip→palm-centre distance relative to palm length
-const FIST_CLOSE = 1.0;  // below this the hand counts as a fist
-const FIST_OPEN = 1.4;   // above this it counts as open again
+// Two-palm squeeze: hands count as flat/open above this (fingertip→palm-centre / palm length)
+const PALM_OPEN = 1.1;
+const SQUEEZE_MIN = 0.06;      // narrowest the sheet can be pressed (fraction of its width)
+const SQUEEZE_RECOVER = 0.45;  // how much of the squeeze the paper springs back on release
+const SQUEEZE_LOST_MS = 400;   // keep the press this long if a hand drops out
 const PALM_IDX = [0, 5, 9, 13, 17];
 const TIP_IDX = [8, 12, 16, 20];
 
@@ -168,36 +170,25 @@ function foldField(x, y, seed) {
   };
 }
 
-// Crumple targets, in palm-size units relative to the palm centre.
-// closing: squeeze everything into a small ball (hidden in the fist).
-// opening: back towards the original sheet, a little smaller each time, with the
-// folds of every crumple so far added up (wrinkles stay).
-function crumpleBall(from, restVerts, fs, seed) {
-  let mx = 0, my = 0;
-  for (const o of from) { mx += o.x; my += o.y; }
-  mx /= from.length; my /= from.length;
-  const k = fs * 1.4;
-  return from.map((o, i) => {
-    const f = foldField(restVerts[i].x / k, restVerts[i].y / k, seed);
-    return { x: (o.x - mx) * 0.12 + f.x * 0.3, y: (o.y - my) * 0.12 + f.y * 0.3 };
+// Press the sheet between two palms: squash horizontally around cx by ratio r.
+// Pressing a sheet sideways makes it buckle, so the columns of the mesh ride up and
+// down in uneven waves (plus some irregular crumple), more the harder it is pressed.
+function squeezeShape(base, restVerts, fs, seed, r, cx) {
+  let bcx = 0;
+  for (const b of base) bcx += b.x;
+  bcx /= base.length;
+  const press = Math.pow(1 - r, 0.7);
+  const k = fs * 0.9, wl = fs * 1.6;
+  return base.map((b, i) => {
+    const rv = restVerts[i];
+    const f = foldField(rv.x / k, rv.y / k, seed);
+    const phase = noise2(rv.x / (wl * 2.5), 0.5, seed + 31) * 6.28;
+    const buckle = Math.sin(rv.x / wl * 6.28 + phase) * (0.6 + noise2(rv.x / wl, rv.y / (fs * 3), seed + 47));
+    return {
+      x: cx + (b.x - bcx) * r + f.x * fs * 0.6 * press,
+      y: b.y + (buckle * 0.7 + f.y * 0.6) * fs * press,
+    };
   });
-}
-function addWrinkles(wrinkle, restVerts, fs, seed) {
-  const k = fs * 1.1, amp = fs * 0.45; // pixels
-  return wrinkle.map((w, i) => {
-    const f = foldField(restVerts[i].x / k, restVerts[i].y / k, seed);
-    return { x: w.x + f.x * amp, y: w.y + f.y * amp };
-  });
-}
-function crumpleOpen(flat, wrinkle, step, palmSize) {
-  let mx = 0, my = 0;
-  for (const o of flat) { mx += o.x; my += o.y; }
-  mx /= flat.length; my /= flat.length;
-  const shrink = Math.pow(0.86, step);
-  return flat.map((o, i) => ({
-    x: (o.x - mx) * shrink + wrinkle[i].x / palmSize,
-    y: (o.y - my) * shrink + wrinkle[i].y / palmSize,
-  }));
 }
 const TRACE_MIN_DIST = 4; // min px between trail points
 const TRACE_PINCH_CLOSE = 40; // px — thumb+index touching
@@ -236,7 +227,6 @@ export default function FingerDrawApp() {
   const otFontRef = useRef(null); // opentype.js font
   const meshRef = useRef(null);   // mesh mode data
   const latestHandsRef = useRef(null); // last detected hands, container CSS coords
-  const fistRef = useRef({ fist: false, palm: null }); // crumple gesture state
   const grainCanvasRef = useRef(null); // grain texture for compositing
   const recordCanvasRef = useRef(null);
   const recordCtxRef = useRef(null);
@@ -710,34 +700,49 @@ export default function FingerDrawApp() {
     gazeLineRef.current = { text: line, fontSize: fontSizeRef.current, tracking: trackingRef.current, color };
   }, []);
 
-  // Begin a crumple step (closing = squeeze into the fist, otherwise spring partly open)
-  const startCrumple = useCallback((m, closing) => {
-    const palm = fistRef.current.palm;
-    if (!palm) return;
-    if (!m.crumple) {
-      if (!closing) return;
-      // leave the physics: release grabs, freeze bodies so we can place them directly
-      for (const g of Object.values(m.grabs || {})) Composite.remove(engineRef.current.world, g.constraint);
-      m.grabs = {};
-      for (const b of m.bodies) Body.setStatic(b, true);
-      const flat = m.bodies.map(b => ({ x: (b.position.x - palm.x) / palm.size, y: (b.position.y - palm.y) / palm.size }));
-      m.crumple = { c: 1, closing: true, palm, from: [], to: [], step: 0, flat,
-        wrinkle: m.bodies.map(() => ({ x: 0, y: 0 })) };
+  // Two-palm squeeze state machine (called on every hand-detection frame)
+  const updateSqueeze = useCallback((m, metrics, now) => {
+    const fsz = fontSizeRef.current;
+    let sq = m.squeeze;
+    const release = () => {
+      const rRest = 1 - (1 - sq.rMin) * SQUEEZE_RECOVER;
+      const from = sq.target;
+      const to = squeezeShape(sq.base, m.restVerts, fsz, sq.seed, rRest, sq.cx);
+      sq.base = to; sq.active = false; sq.hidden = false;
+      sq.release = { from, to, t: 0 };
+    };
+    const open = metrics.filter(h => h.open > PALM_OPEN).sort((a, b) => a.cx - b.cx);
+    if (open.length >= 2) {
+      const L = open[0], R = open[open.length - 1];
+      const gap = R.cx - L.cx - (L.size + R.size) * 0.15; // allow for hand thickness
+      const cur = sq ? sq.base : m.bodies.map(b => ({ x: b.position.x, y: b.position.y }));
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const p of cur) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); }
+      const w0 = maxX - minX, midX = (minX + maxX) / 2;
+      const palmsY = (L.cy + R.cy) / 2;
+      const inside = L.cx < midX && R.cx > midX && palmsY > minY - L.size && palmsY < maxY + L.size;
+      if (!sq?.active) {
+        if (inside && gap < w0 * 1.02) {
+          if (!sq) {
+            // leave physics: drop grabs, freeze bodies, place them directly from now on
+            for (const g of Object.values(m.grabs || {})) Composite.remove(engineRef.current.world, g.constraint);
+            m.grabs = {};
+            for (const b of m.bodies) Body.setStatic(b, true);
+            sq = m.squeeze = { base: cur, target: cur, seed: 0 };
+          }
+          Object.assign(sq, { active: true, w0, rMin: 1, seed: sq.seed + 1, release: null, lastBoth: now });
+        } else return;
+      }
+      if (gap > sq.w0 * 1.1) { release(); return; }
+      const r = Math.max(SQUEEZE_MIN, Math.min(1, gap / sq.w0));
+      sq.rMin = Math.min(sq.rMin, r);
+      sq.cx = (L.cx + R.cx) / 2;
+      sq.target = squeezeShape(sq.base, m.restVerts, fsz, sq.seed, r, sq.cx);
+      sq.hidden = r <= SQUEEZE_MIN + 0.02; // palms together: the sheet is out of sight
+      sq.lastBoth = now;
+    } else if (sq?.active && now - sq.lastBoth > SQUEEZE_LOST_MS) {
+      release();
     }
-    const cr = m.crumple, fsz = fontSizeRef.current;
-    // current shape, relative to the palm, in palm-size units
-    const cur = m.bodies.map(b => ({ x: (b.position.x - palm.x) / palm.size, y: (b.position.y - palm.y) / palm.size }));
-    cr.palm = palm;
-    cr.from = cur;
-    if (closing) {
-      cr.step += 1;
-      cr.to = crumpleBall(cur, m.restVerts, fsz, cr.step * 3.7);
-    } else {
-      cr.wrinkle = addWrinkles(cr.wrinkle, m.restVerts, fsz, cr.step * 5.3);
-      cr.to = crumpleOpen(cr.flat, cr.wrinkle, cr.step, palm.size);
-    }
-    cr.closing = closing;
-    cr.c = 0;
   }, []);
 
   // Main loop: physics + pose detection + canvas rendering
@@ -768,21 +773,21 @@ export default function FingerDrawApp() {
 
       if ((mode === 'fall' || mode === 'mesh') && engineRef.current) Engine.update(engineRef.current, dt);
 
-      // Crumple: drive mesh vertices kinematically, following the palm
-      if (mode === 'mesh' && meshRef.current?.crumple) {
-        const m = meshRef.current, cr = m.crumple, palm = fistRef.current.palm;
-        if (palm) cr.palm = palm;
-        const P = cr.palm;
-        cr.c = Math.min(1, cr.c + dt / (cr.closing ? 260 : 520));
-        const e = 1 - Math.pow(1 - cr.c, 3);
-        for (let i = 0; i < m.bodies.length; i++) {
-          const a = cr.from[i], b = cr.to[i];
-          Body.setPosition(m.bodies[i], {
-            x: P.x + (a.x + (b.x - a.x) * e) * P.size,
-            y: P.y + (a.y + (b.y - a.y) * e) * P.size,
-          });
+      // Squeeze: ease mesh vertices towards the pressed shape
+      if (mode === 'mesh' && meshRef.current?.squeeze) {
+        const m = meshRef.current, sq = m.squeeze;
+        if (!sq.active && sq.release) {
+          sq.release.t = Math.min(1, sq.release.t + dt / 450);
+          const e = 1 - Math.pow(1 - sq.release.t, 3);
+          sq.target = sq.release.from.map((a, i) => ({
+            x: a.x + (sq.release.to[i].x - a.x) * e, y: a.y + (sq.release.to[i].y - a.y) * e }));
+          if (sq.release.t >= 1) sq.release = null;
         }
-        cr.hidden = cr.closing && cr.c > 0.55;
+        const ease = sq.active ? 0.45 : 1;
+        for (let i = 0; i < m.bodies.length; i++) {
+          const p = m.bodies[i].position, t = sq.target[i];
+          Body.setPosition(m.bodies[i], { x: p.x + (t.x - p.x) * ease, y: p.y + (t.y - p.y) * ease });
+        }
       }
 
       const video = videoRef.current;
@@ -854,21 +859,15 @@ export default function FingerDrawApp() {
                 const m = meshRef.current;
                 const activeHands = new Set();
 
-                // --- Crumple: closing a hand into a fist crumples the text into it ---
+                // --- Squeeze: press the text between two flat palms ---
                 const metrics = latestHandsRef.current.map(handMetrics);
-                const fs = fistRef.current;
-                const fistHand = metrics.findIndex(h => h.open < (fs.fist ? FIST_OPEN : FIST_CLOSE));
-                const track = metrics[fistHand >= 0 ? fistHand : 0];
-                fs.palm = { x: track.cx, y: track.cy, size: track.size };
-                if (fistHand >= 0 && !fs.fist) { fs.fist = true; startCrumple(m, true); }
-                else if (fistHand < 0 && fs.fist) { fs.fist = false; startCrumple(m, false); }
-
+                updateSqueeze(m, metrics, now);
                 for (let hi = 0; hi < numHands; hi++) {
                   const hand = handRes.landmarks[hi];
                   const thumb = landmarkToCss(hand[HAND_THUMB_TIP].x, hand[HAND_THUMB_TIP].y);
                   const idx = landmarkToCss(hand[HAND_INDEX_TIP].x, hand[HAND_INDEX_TIP].y);
                   const gap = Math.hypot(idx.x - thumb.x, idx.y - thumb.y);
-                  const pinching = gap < TRACE_PINCH_CLOSE && !m.crumple && metrics[hi].open > FIST_OPEN;
+                  const pinching = gap < TRACE_PINCH_CLOSE && !m.squeeze;
                   activeHands.add(hi);
 
                   if (pinching && !m.grabs?.[hi]) {
@@ -906,6 +905,7 @@ export default function FingerDrawApp() {
             } else {
               traceDebugRef.current = null;
               latestHandsRef.current = null;
+              if (mode === 'mesh' && meshRef.current) updateSqueeze(meshRef.current, [], now);
               // Release all grabs if no hands detected
               if (mode === 'mesh' && meshRef.current?.grabs) {
                 for (const g of Object.values(meshRef.current.grabs)) {
@@ -1079,7 +1079,7 @@ export default function FingerDrawApp() {
               charDist += ctx.measureText(text[ci]).width + trk;
             }
           }
-        } else if (mode === 'mesh' && meshRef.current && !meshRef.current.crumple?.hidden) {
+        } else if (mode === 'mesh' && meshRef.current && !meshRef.current.squeeze?.hidden) {
           const m = meshRef.current;
           const color = COLOR_PALETTE[charColorRef.current];
           ctx.beginPath();
@@ -1121,7 +1121,7 @@ export default function FingerDrawApp() {
 
     animFrameRef.current = requestAnimationFrame(loop);
     return () => { if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current); };
-  }, [modelLoading, updateBodyFromPose, hideBody, landmarkToCss, startCrumple]);
+  }, [modelLoading, updateBodyFromPose, hideBody, landmarkToCss, updateSqueeze]);
 
   // Toggle camera facing mode
   const toggleCamera = useCallback(() => {
@@ -1244,7 +1244,6 @@ export default function FingerDrawApp() {
 
     const pathMap = buildPathMap(combined.commands, offX, offY, restVerts, tris);
     meshRef.current = { restVerts, bodies, constraints: [...constraints, ...pins], tris, pathMap, grabs: {} };
-    fistRef.current = { fist: false, palm: null };
   }, []);
   useEffect(() => { initMeshRef.current = initMesh; }, [initMesh]);
 
