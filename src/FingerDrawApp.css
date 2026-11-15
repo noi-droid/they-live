@@ -145,6 +145,7 @@
 /* Row 2: sliders + buttons */
 .fd-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
 }
@@ -155,7 +156,7 @@
   flex-direction: column;
   gap: 2px;
   flex: 1;
-  min-width: 0;
+  min-width: 150px;
 }
 
 /* Size / tracking control */
