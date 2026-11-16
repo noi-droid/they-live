@@ -282,12 +282,17 @@ const HAND_FILTER_RESET_MS = 300; // forget a hand's filter state after it has b
 const PALM_SHOW = 1.45;    // fingers at least this extended show the word (see handMetrics ext)
 const PALM_FIST = 0.95;    // this curled or more counts as a full fist
 const PALM_LOST_MS = 600;  // hand gone this long: start over with a fresh word
-// Presets by amount of text: block width on the palm (× palm length), and the tracking /
-// leading they set on the sliders (still adjustable afterwards)
+// Block width on the palm (× palm length), picked from the amount of text
 const PALM_PRESETS = {
-  S: { label: 'S', w: 1.15, tracking: -2, leading: 0.95 }, // up to 4 characters
-  M: { label: 'M', w: 1.5, tracking: 0, leading: 1.0 },    // up to 14 characters
-  L: { label: 'L', w: 2.0, tracking: 0, leading: 1.15 },   // more
+  S: { w: 1.15 }, // up to 4 characters
+  M: { w: 1.5 },  // up to 14 characters
+  L: { w: 2.0 },  // more
+};
+// Dummy texts by length (S / M / L buttons in palm mode)
+const PALM_DUMMY = {
+  S: 'WIND',
+  M: 'HELD\nBY WIND',
+  L: 'Wind is only ever\nseen in what it moves.\nA sentence loses its\nfirst words before\nanyone has read them.',
 };
 function pickPalmPreset(text) {
   const n = text.replace(/\s/g, '').length;
@@ -401,8 +406,6 @@ export default function FingerDrawApp() {
   const latestHandsRef = useRef(null); // last detected hands, container CSS coords
   const deskRef = useRef(null); // desk mode: letter bodies + hand colliders
   const palmRef = useRef(null); // palm mode: word mesh + crumple state
-  const palmPresetRef = useRef('auto');
-  const palmAppliedRef = useRef(null); // preset last applied to the sliders
   const handFiltersRef = useRef({}); // per-hand (Left/Right) One Euro filters for the 21 landmarks
   const underHandsRef = useRef(true);
   const grainCanvasRef = useRef(null); // grain texture for compositing
@@ -441,7 +444,6 @@ export default function FingerDrawApp() {
   const [leading, setLeading] = useState(1.3);
   const [videoPaused, setVideoPaused] = useState(false);
   const [underHands, setUnderHands] = useState(true);
-  const [palmPreset, setPalmPreset] = useState('auto'); // 'auto' | 'S' | 'M' | 'L'
   const [facingMode, setFacingMode] = useState('user');
   const [sourceMode, setSourceMode] = useState('camera'); // 'camera' | 'video'
   const [displayMode, setDisplayMode] = useState('fall'); // 'fall' | 'gaze'
@@ -469,7 +471,6 @@ export default function FingerDrawApp() {
   useEffect(() => { trackingRef.current = tracking; }, [tracking]);
   useEffect(() => { leadingRef.current = leading; }, [leading]);
   useEffect(() => { underHandsRef.current = underHands; }, [underHands]);
-  useEffect(() => { palmPresetRef.current = palmPreset; }, [palmPreset]);
   useEffect(() => { facingModeRef.current = facingMode; }, [facingMode]);
   useEffect(() => { sourceModeRef.current = sourceMode; }, [sourceMode]);
   useEffect(() => { displayModeRef.current = displayMode; }, [displayMode]);
@@ -1022,7 +1023,7 @@ export default function FingerDrawApp() {
     while (lines.length && !lines[0]) lines.shift();
     while (lines.length && !lines[lines.length - 1]) lines.pop();
     if (!lines.length) lines = ['FORCE'];
-    const key = palmPresetRef.current === 'auto' ? pickPalmPreset(lines.join('')) : palmPresetRef.current;
+    const key = pickPalmPreset(lines.join(''));
     // tracking slider is in px at the current font size; convert to the reference size
     const track = trackingRef.current * (PALM_REF_FS / fontSizeRef.current);
     const word = buildPalmWord(font, lines, track, leadingRef.current);
@@ -1743,18 +1744,8 @@ export default function FingerDrawApp() {
     if (md !== 'mesh' && md !== 'desk' && md !== 'palm') return;
     const id = setTimeout(() => (md === 'desk' ? initDeskRef.current?.() : md === 'palm' ? initPalmRef.current?.() : initMeshRef.current?.()), 250);
     return () => clearTimeout(id);
-  }, [inputText, fontSize, tracking, leading, palmPreset]);
+  }, [inputText, fontSize, tracking, leading]);
 
-  // Palm mode: when the preset (picked from the amount of text, or chosen) changes,
-  // set its tracking and leading on the sliders; they stay adjustable after that.
-  useEffect(() => {
-    if (displayMode !== 'palm') { palmAppliedRef.current = null; return; }
-    const key = palmPreset === 'auto' ? pickPalmPreset(inputText) : palmPreset;
-    if (palmAppliedRef.current === key) return;
-    palmAppliedRef.current = key;
-    setTracking(PALM_PRESETS[key].tracking);
-    setLeading(PALM_PRESETS[key].leading);
-  }, [displayMode, inputText, palmPreset]);
 
   // Export the deformed mesh text as SVG, in the source video's own pixel space
   // (visual orientation), so it can be laid over a full-resolution frame of the same footage.
@@ -2098,14 +2089,12 @@ export default function FingerDrawApp() {
               {videoPaused ? '▶' : '❚❚'}
             </button>
           )}
-          {displayMode === 'palm' && (
-            <button
-              onClick={() => setPalmPreset(p => ({ auto: 'S', S: 'M', M: 'L', L: 'auto' }[p]))}
-              className={`fd-btn${palmPreset !== 'auto' ? ' fd-btn-active' : ''}`}
-            >
-              {palmPreset === 'auto' ? `AUTO ${pickPalmPreset(inputText)}` : palmPreset}
+          {displayMode === 'palm' && ['S', 'M', 'L'].map(k => (
+            <button key={k} onClick={() => setInputText(PALM_DUMMY[k])}
+              className={`fd-btn${inputText === PALM_DUMMY[k] ? ' fd-btn-active' : ''}`}>
+              {k}
             </button>
-          )}
+          ))}
           {(displayMode === 'mesh' || displayMode === 'desk' || displayMode === 'palm') && (
             <button onClick={() => setUnderHands(u => !u)} className={`fd-btn${underHands ? ' fd-btn-active' : ''}`}>
               UNDER
