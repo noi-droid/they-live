@@ -58,7 +58,7 @@ const MESH_COLLISION = { category: 0x0004, mask: 0 };
 // another (paper on paper) and gather into loose heaps rather than packing solid.
 const DESK_LETTER = 0x0008, DESK_HAND = 0x0010, DESK_WALL = 0x0020;
 const DESK_LETTER_MASK = DESK_LETTER | DESK_HAND | DESK_WALL;
-const DESK_LETTER_DISC = 0.3; // collision radius as a fraction of the letter's larger side
+const DESK_LETTER_DISC = 0.45; // collision radius as a fraction of the letter's smaller side
 const DESK_SUBSTEPS = 3;
 const WIND_FORCE = 0.0003;
 
@@ -910,17 +910,19 @@ export default function FingerDrawApp() {
     const spaceW = (font.charToGlyph(' ').advanceWidth || 250) * scale + trk;
     const maxW = cw * 0.85;
 
-    // word-wrapped layout (same rules as the mesh)
-    const words = inputTextRef.current.replace(/\n/g, ' ').split(/\s+/).filter(Boolean);
+    // layout (same rules as the mesh): typed line breaks are kept, long lines wrap
     const lines = [];
-    let cur = [], curW = 0;
-    for (const w of words) {
-      let ww = -trk;
-      for (const c of w) ww += (font.charToGlyph(c).advanceWidth || 0) * scale + trk;
-      if (curW + ww > maxW && cur.length) { lines.push({ words: cur, w: curW - spaceW }); cur = [w]; curW = ww + spaceW; }
-      else { cur.push(w); curW += ww + spaceW; }
+    for (const para of inputTextRef.current.split('\n')) {
+      const words = para.split(/\s+/).filter(Boolean);
+      let cur = [], curW = 0;
+      for (const w of words) {
+        let ww = -trk;
+        for (const c of w) ww += (font.charToGlyph(c).advanceWidth || 0) * scale + trk;
+        if (curW + ww > maxW && cur.length) { lines.push({ words: cur, w: curW - spaceW }); cur = [w]; curW = ww + spaceW; }
+        else { cur.push(w); curW += ww + spaceW; }
+      }
+      if (cur.length) lines.push({ words: cur, w: curW - spaceW });
     }
-    if (cur.length) lines.push({ words: cur, w: curW - spaceW });
 
     const blockW = Math.max(...lines.map(l => l.w), 0);
     const x0 = (cw - blockW) / 2;
@@ -941,7 +943,7 @@ export default function FingerDrawApp() {
             }
             return o;
           });
-          const body = Bodies.circle(x + adv / 2, baseY - capH / 2, Math.max(adv, capH) * DESK_LETTER_DISC, {
+          const body = Bodies.circle(x + adv / 2, baseY - capH / 2, Math.max(fs * 0.06, Math.min(adv, capH) * DESK_LETTER_DISC), {
             frictionAir: 0.14, friction: 0.4, restitution: 0, density: 0.002,
             collisionFilter: { category: DESK_LETTER, mask: DESK_LETTER_MASK },
           });
@@ -1641,7 +1643,7 @@ export default function FingerDrawApp() {
       meshRef.current = null;
     }
 
-    const text = inputTextRef.current.replace(/\n/g, ' ');
+    const text = inputTextRef.current;
     const fs = fontSizeRef.current;
     const trk = trackingRef.current;
     const { w: cw, h: ch } = containerSizeRef.current;
@@ -1650,21 +1652,23 @@ export default function FingerDrawApp() {
     const maxW = cw * 0.85;
     const spaceW = (font.charToGlyph(' ').advanceWidth || 250) * scale + trk;
 
-    // Word-wrap layout
-    const words = text.split(/\s+/).filter(w => w.length > 0);
+    // Layout: typed line breaks are kept, long lines wrap
     const lines = [];
-    let curLine = [], curW = 0;
-    for (const word of words) {
-      let ww = 0;
-      for (const ch2 of word) ww += (font.charToGlyph(ch2).advanceWidth || 0) * scale + trk;
-      ww -= trk;
-      if (curW + ww > maxW && curLine.length > 0) {
-        lines.push(curLine); curLine = [word]; curW = ww + spaceW;
-      } else {
-        curLine.push(word); curW += ww + spaceW;
+    for (const para of text.split('\n')) {
+      const words = para.split(/\s+/).filter(w => w.length > 0);
+      let curLine = [], curW = 0;
+      for (const word of words) {
+        let ww = 0;
+        for (const ch2 of word) ww += (font.charToGlyph(ch2).advanceWidth || 0) * scale + trk;
+        ww -= trk;
+        if (curW + ww > maxW && curLine.length > 0) {
+          lines.push(curLine); curLine = [word]; curW = ww + spaceW;
+        } else {
+          curLine.push(word); curW += ww + spaceW;
+        }
       }
+      if (curLine.length > 0) lines.push(curLine);
     }
-    if (curLine.length > 0) lines.push(curLine);
 
     // Build combined path with tracking
     const combined = new OTPath();
