@@ -288,7 +288,7 @@ const PALM_PRESETS = {
   M: { w: 1.5 },  // up to 14 characters
   L: { w: 2.0 },  // more
 };
-// Dummy texts by length (S / M / L buttons in palm mode)
+// Dummy texts by length (S / M / L buttons in mesh, desk and palm modes)
 const PALM_DUMMY = {
   S: 'WIND',
   M: 'HELD\nBY WIND',
@@ -2093,7 +2093,7 @@ export default function FingerDrawApp() {
               {videoPaused ? '▶' : '❚❚'}
             </button>
           )}
-          {displayMode === 'palm' && ['S', 'M', 'L'].map(k => (
+          {(displayMode === 'mesh' || displayMode === 'desk' || displayMode === 'palm') && ['S', 'M', 'L'].map(k => (
             <button key={k} onClick={() => setInputText(PALM_DUMMY[k])}
               className={`fd-btn${inputText === PALM_DUMMY[k] ? ' fd-btn-active' : ''}`}>
               {k}
