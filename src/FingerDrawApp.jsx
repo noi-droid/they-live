@@ -156,7 +156,14 @@ function handMetrics(pts) {
   const size = Math.hypot(pts[9].x - pts[0].x, pts[9].y - pts[0].y) || 1;
   let tip = 0;
   for (const i of TIP_IDX) tip += Math.hypot(pts[i].x - cx, pts[i].y - cy);
-  return { cx, cy, size, open: tip / TIP_IDX.length / size };
+  // ext: how far each fingertip reaches from the wrist compared with its knuckle (MCP).
+  // About 1.8-2 with the fingers stretched out, about 1 or less in a fist.
+  let ext = 0;
+  for (const [mcp, t] of [[5, 8], [9, 12], [13, 16], [17, 20]]) {
+    const dm = Math.hypot(pts[mcp].x - pts[0].x, pts[mcp].y - pts[0].y) || 1;
+    ext += Math.hypot(pts[t].x - pts[0].x, pts[t].y - pts[0].y) / dm;
+  }
+  return { cx, cy, size, open: tip / TIP_IDX.length / size, ext: ext / 4 };
 }
 
 // Smooth 2D value noise (for coherent folds)
@@ -272,8 +279,8 @@ class OneEuro {
 }
 const HAND_FILTER_RESET_MS = 300; // forget a hand's filter state after it has been gone this long
 // Palm mode: a short word sits on an open palm; closing the hand crumples it into the fist
-const PALM_SHOW = 1.45;    // hand at least this open shows the word (fingertip→palm-centre / palm length)
-const PALM_FIST = 0.95;    // this closed or more counts as a full fist
+const PALM_SHOW = 1.45;    // fingers at least this extended show the word (see handMetrics ext)
+const PALM_FIST = 0.95;    // this curled or more counts as a full fist
 const PALM_LOST_MS = 600;  // hand gone this long: start over with a fresh word
 const PALM_WORD_W = 1.15;  // word width as a multiple of palm length
 const PALM_REF_FS = 100;   // reference size the word mesh is built at
@@ -1002,10 +1009,10 @@ export default function FingerDrawApp() {
     const h = hands[hi], m = ms[hi];
     pr.lastSeen = now;
     if (!pr.visible) {
-      if (m.open < PALM_SHOW) return; // wait for an open palm
+      if (m.ext < PALM_SHOW) return; // wait for an open palm
       pr.visible = true;
     }
-    pr.target = Math.max(0, Math.min(1, (PALM_SHOW - m.open) / (PALM_SHOW - PALM_FIST)));
+    pr.target = Math.max(0, Math.min(1, (PALM_SHOW - m.ext) / (PALM_SHOW - PALM_FIST)));
     pr.T = {
       cx: m.cx, cy: m.cy,
       angle: Math.atan2(h[9].y - h[0].y, h[9].x - h[0].x) + Math.PI / 2, // fingers up = upright
@@ -1507,6 +1514,18 @@ export default function FingerDrawApp() {
           ctx.fillStyle = '#000'; ctx.strokeStyle = '#000';
           // palm mode: the word lies on the palm, so only the closing fingers cover it
           if (mode === 'palm') paintFingers(ctx, handsNow); else paintHandSilhouettes(ctx, handsNow);
+          ctx.restore();
+        }
+
+        // Palm mode with UNDER off: show each hand's openness value, for tuning the thresholds
+        if (mode === 'palm' && handsNow && !underHandsRef.current) {
+          ctx.save();
+          ctx.font = '12px monospace';
+          ctx.fillStyle = 'rgba(255,255,255,0.8)';
+          for (const h of handsNow) {
+            const { ext } = handMetrics(h);
+            ctx.fillText(`open ${ext.toFixed(2)}  (show ≥ ${PALM_SHOW}, fist ≤ ${PALM_FIST})`, h[0].x + 10, h[0].y + 20);
+          }
           ctx.restore();
         }
 
