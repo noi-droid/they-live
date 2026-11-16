@@ -315,7 +315,8 @@ function buildPalmWord(font, lines, track, lead) {
     const y = li * PALM_REF_FS * lead;
     glyphs.forEach((g, i) => {
       commands.push(...g.getPath(x, y, PALM_REF_FS).commands);
-      x += (g.advanceWidth || 0) * scale + track;
+      // tight tracking never eats the word space
+      x += (g.advanceWidth || 0) * scale + (track < 0 && g.unicode === 32 ? -track : track);
       if (i < glyphs.length - 1) x += font.getKerningValue(g, glyphs[i + 1]) * scale;
     });
   });
@@ -909,7 +910,7 @@ export default function FingerDrawApp() {
     const scale = fs / font.unitsPerEm;
     const capH = (font.tables.os2?.sCapHeight || font.unitsPerEm * 0.7) * scale;
     const lineH = fs * leadingRef.current;
-    const spaceW = (font.charToGlyph(' ').advanceWidth || 250) * scale + trk;
+    const spaceW = (font.charToGlyph(' ').advanceWidth || 250) * scale + Math.abs(trk); // tight tracking never eats the word space
     const maxW = cw * 0.85;
 
     // layout (same rules as the mesh): typed line breaks are kept, long lines wrap
@@ -1652,7 +1653,7 @@ export default function FingerDrawApp() {
     const scale = fs / font.unitsPerEm;
     const lineH = fs * leadingRef.current;
     const maxW = cw * 0.85;
-    const spaceW = (font.charToGlyph(' ').advanceWidth || 250) * scale + trk;
+    const spaceW = (font.charToGlyph(' ').advanceWidth || 250) * scale + Math.abs(trk); // tight tracking never eats the word space
 
     // Layout: typed line breaks are kept, long lines wrap
     const lines = [];
