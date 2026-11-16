@@ -282,29 +282,60 @@ const HAND_FILTER_RESET_MS = 300; // forget a hand's filter state after it has b
 const PALM_SHOW = 1.45;    // fingers at least this extended show the word (see handMetrics ext)
 const PALM_FIST = 0.95;    // this curled or more counts as a full fist
 const PALM_LOST_MS = 600;  // hand gone this long: start over with a fresh word
-const PALM_WORD_W = 1.15;  // word width as a multiple of palm length
+// Presets by amount of text: block width on the palm (× palm length), and the tracking /
+// leading they set on the sliders (still adjustable afterwards)
+const PALM_PRESETS = {
+  S: { label: 'S', w: 1.15, tracking: -2, leading: 0.95 }, // up to 4 characters
+  M: { label: 'M', w: 1.5, tracking: 0, leading: 1.0 },    // up to 14 characters
+  L: { label: 'L', w: 2.0, tracking: 0, leading: 1.15 },   // more
+};
+function pickPalmPreset(text) {
+  const n = text.replace(/\s/g, '').length;
+  return n <= 4 ? 'S' : n <= 14 ? 'M' : 'L';
+}
 const PALM_REF_FS = 100;   // reference size the word mesh is built at
 const PALM_COLS = 14, PALM_ROWS = 8;
 
-// Word outline + deformation mesh in local units, centred on (0, 0)
-function buildPalmWord(font, text) {
-  const path = font.getPath(text, 0, 0, PALM_REF_FS);
-  const bb = path.getBoundingBox();
-  if (!isFinite(bb.x1) || bb.x2 <= bb.x1) return null;
-  const offX = -(bb.x1 + bb.x2) / 2, offY = -(bb.y1 + bb.y2) / 2, pad = PALM_REF_FS * 0.3;
-  const w = bb.x2 - bb.x1, h = bb.y2 - bb.y1;
+// Text block outline + deformation mesh in local units, centred on (0, 0).
+// lines are set flush left; track is extra space per letter and lead the line height,
+// both at the reference size.
+function buildPalmWord(font, lines, track, lead) {
+  const scale = PALM_REF_FS / font.unitsPerEm;
+  const commands = [];
+  lines.forEach((line, li) => {
+    const glyphs = font.stringToGlyphs(line);
+    let x = 0;
+    const y = li * PALM_REF_FS * lead;
+    glyphs.forEach((g, i) => {
+      commands.push(...g.getPath(x, y, PALM_REF_FS).commands);
+      x += (g.advanceWidth || 0) * scale + track;
+      if (i < glyphs.length - 1) x += font.getKerningValue(g, glyphs[i + 1]) * scale;
+    });
+  });
+  let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
+  for (const c of commands) {
+    for (const [kx, ky] of [['x', 'y'], ['x1', 'y1'], ['x2', 'y2']]) {
+      if (c[kx] === undefined) continue;
+      x1 = Math.min(x1, c[kx]); x2 = Math.max(x2, c[kx]); y1 = Math.min(y1, c[ky]); y2 = Math.max(y2, c[ky]);
+    }
+  }
+  if (!isFinite(x1) || x2 <= x1) return null;
+  const offX = -(x1 + x2) / 2, offY = -(y1 + y2) / 2, pad = PALM_REF_FS * 0.3;
+  const w = x2 - x1, h = y2 - y1;
   const x0 = -w / 2 - pad, y0 = -h / 2 - pad, mw = w + pad * 2, mh = h + pad * 2;
+  // keep the mesh cells roughly square whatever the block's proportions
+  const cols = PALM_COLS, rows = Math.max(PALM_ROWS, Math.min(24, Math.round((cols - 1) * mh / mw) + 1));
   const restVerts = [];
-  for (let r = 0; r < PALM_ROWS; r++)
-    for (let c = 0; c < PALM_COLS; c++)
-      restVerts.push({ x: x0 + (c / (PALM_COLS - 1)) * mw, y: y0 + (r / (PALM_ROWS - 1)) * mh });
+  for (let r = 0; r < rows; r++)
+    for (let c = 0; c < cols; c++)
+      restVerts.push({ x: x0 + (c / (cols - 1)) * mw, y: y0 + (r / (rows - 1)) * mh });
   const tris = [];
-  for (let r = 0; r < PALM_ROWS - 1; r++)
-    for (let c = 0; c < PALM_COLS - 1; c++) {
-      const tl = r * PALM_COLS + c, tr = tl + 1, bl = tl + PALM_COLS, br = bl + 1;
+  for (let r = 0; r < rows - 1; r++)
+    for (let c = 0; c < cols - 1; c++) {
+      const tl = r * cols + c, tr = tl + 1, bl = tl + cols, br = bl + 1;
       tris.push([tl, tr, bl], [tr, br, bl]);
     }
-  return { restVerts, tris, pathMap: buildPathMap(path.commands, offX, offY, restVerts, tris), w };
+  return { restVerts, tris, pathMap: buildPathMap(commands, offX, offY, restVerts, tris), w, h };
 }
 
 // Local vertex positions for crumple amount c (0 = flat, 1 = balled up). Wrinkles from
@@ -370,6 +401,8 @@ export default function FingerDrawApp() {
   const latestHandsRef = useRef(null); // last detected hands, container CSS coords
   const deskRef = useRef(null); // desk mode: letter bodies + hand colliders
   const palmRef = useRef(null); // palm mode: word mesh + crumple state
+  const palmPresetRef = useRef('auto');
+  const palmAppliedRef = useRef(null); // preset last applied to the sliders
   const handFiltersRef = useRef({}); // per-hand (Left/Right) One Euro filters for the 21 landmarks
   const underHandsRef = useRef(true);
   const grainCanvasRef = useRef(null); // grain texture for compositing
@@ -408,6 +441,7 @@ export default function FingerDrawApp() {
   const [leading, setLeading] = useState(1.3);
   const [videoPaused, setVideoPaused] = useState(false);
   const [underHands, setUnderHands] = useState(true);
+  const [palmPreset, setPalmPreset] = useState('auto'); // 'auto' | 'S' | 'M' | 'L'
   const [facingMode, setFacingMode] = useState('user');
   const [sourceMode, setSourceMode] = useState('camera'); // 'camera' | 'video'
   const [displayMode, setDisplayMode] = useState('fall'); // 'fall' | 'gaze'
@@ -435,6 +469,7 @@ export default function FingerDrawApp() {
   useEffect(() => { trackingRef.current = tracking; }, [tracking]);
   useEffect(() => { leadingRef.current = leading; }, [leading]);
   useEffect(() => { underHandsRef.current = underHands; }, [underHands]);
+  useEffect(() => { palmPresetRef.current = palmPreset; }, [palmPreset]);
   useEffect(() => { facingModeRef.current = facingMode; }, [facingMode]);
   useEffect(() => { sourceModeRef.current = sourceMode; }, [sourceMode]);
   useEffect(() => { displayModeRef.current = displayMode; }, [displayMode]);
@@ -983,11 +1018,17 @@ export default function FingerDrawApp() {
   const initPalm = useCallback(() => {
     const font = otFontRef.current;
     if (!font) return;
-    const text = (inputTextRef.current.split('\n').map(t => t.trim()).find(Boolean)) || 'FORCE';
-    const word = buildPalmWord(font, text);
+    let lines = inputTextRef.current.split('\n').map(t => t.trim());
+    while (lines.length && !lines[0]) lines.shift();
+    while (lines.length && !lines[lines.length - 1]) lines.pop();
+    if (!lines.length) lines = ['FORCE'];
+    const key = palmPresetRef.current === 'auto' ? pickPalmPreset(lines.join('')) : palmPresetRef.current;
+    // tracking slider is in px at the current font size; convert to the reference size
+    const track = trackingRef.current * (PALM_REF_FS / fontSizeRef.current);
+    const word = buildPalmWord(font, lines, track, leadingRef.current);
     if (!word) { palmRef.current = null; return; }
     palmRef.current = {
-      word, visible: false, c: 0, target: 0, maxC: 0, seed: 1, lastSeen: 0, T: null,
+      word, widthMul: PALM_PRESETS[key].w, presetKey: key, visible: false, c: 0, target: 0, maxC: 0, seed: 1, lastSeen: 0, T: null,
       wrinkle: word.restVerts.map(() => ({ x: 0, y: 0 })),
     };
   }, []);
@@ -1016,7 +1057,7 @@ export default function FingerDrawApp() {
     pr.T = {
       cx: m.cx, cy: m.cy,
       angle: Math.atan2(h[9].y - h[0].y, h[9].x - h[0].x) + Math.PI / 2, // fingers up = upright
-      s: (m.size * PALM_WORD_W) / pr.word.w,
+      s: (m.size * pr.widthMul) / pr.word.w,
     };
   }, []);
 
@@ -1702,7 +1743,18 @@ export default function FingerDrawApp() {
     if (md !== 'mesh' && md !== 'desk' && md !== 'palm') return;
     const id = setTimeout(() => (md === 'desk' ? initDeskRef.current?.() : md === 'palm' ? initPalmRef.current?.() : initMeshRef.current?.()), 250);
     return () => clearTimeout(id);
-  }, [inputText, fontSize, tracking, leading]);
+  }, [inputText, fontSize, tracking, leading, palmPreset]);
+
+  // Palm mode: when the preset (picked from the amount of text, or chosen) changes,
+  // set its tracking and leading on the sliders; they stay adjustable after that.
+  useEffect(() => {
+    if (displayMode !== 'palm') { palmAppliedRef.current = null; return; }
+    const key = palmPreset === 'auto' ? pickPalmPreset(inputText) : palmPreset;
+    if (palmAppliedRef.current === key) return;
+    palmAppliedRef.current = key;
+    setTracking(PALM_PRESETS[key].tracking);
+    setLeading(PALM_PRESETS[key].leading);
+  }, [displayMode, inputText, palmPreset]);
 
   // Export the deformed mesh text as SVG, in the source video's own pixel space
   // (visual orientation), so it can be laid over a full-resolution frame of the same footage.
@@ -2044,6 +2096,14 @@ export default function FingerDrawApp() {
           {sourceMode === 'video' && (
             <button onClick={togglePause} className={`fd-btn${videoPaused ? ' fd-btn-active' : ''}`}>
               {videoPaused ? '▶' : '❚❚'}
+            </button>
+          )}
+          {displayMode === 'palm' && (
+            <button
+              onClick={() => setPalmPreset(p => ({ auto: 'S', S: 'M', M: 'L', L: 'auto' }[p]))}
+              className={`fd-btn${palmPreset !== 'auto' ? ' fd-btn-active' : ''}`}
+            >
+              {palmPreset === 'auto' ? `AUTO ${pickPalmPreset(inputText)}` : palmPreset}
             </button>
           )}
           {(displayMode === 'mesh' || displayMode === 'desk' || displayMode === 'palm') && (
