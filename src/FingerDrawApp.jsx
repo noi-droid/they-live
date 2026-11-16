@@ -271,6 +271,59 @@ class OneEuro {
   }
 }
 const HAND_FILTER_RESET_MS = 300; // forget a hand's filter state after it has been gone this long
+// Palm mode: a short word sits on an open palm; closing the hand crumples it into the fist
+const PALM_SHOW = 1.45;    // hand at least this open shows the word (fingertip→palm-centre / palm length)
+const PALM_FIST = 0.95;    // this closed or more counts as a full fist
+const PALM_LOST_MS = 600;  // hand gone this long: start over with a fresh word
+const PALM_WORD_W = 1.15;  // word width as a multiple of palm length
+const PALM_REF_FS = 100;   // reference size the word mesh is built at
+const PALM_COLS = 14, PALM_ROWS = 8;
+
+// Word outline + deformation mesh in local units, centred on (0, 0)
+function buildPalmWord(font, text) {
+  const path = font.getPath(text, 0, 0, PALM_REF_FS);
+  const bb = path.getBoundingBox();
+  if (!isFinite(bb.x1) || bb.x2 <= bb.x1) return null;
+  const offX = -(bb.x1 + bb.x2) / 2, offY = -(bb.y1 + bb.y2) / 2, pad = PALM_REF_FS * 0.3;
+  const w = bb.x2 - bb.x1, h = bb.y2 - bb.y1;
+  const x0 = -w / 2 - pad, y0 = -h / 2 - pad, mw = w + pad * 2, mh = h + pad * 2;
+  const restVerts = [];
+  for (let r = 0; r < PALM_ROWS; r++)
+    for (let c = 0; c < PALM_COLS; c++)
+      restVerts.push({ x: x0 + (c / (PALM_COLS - 1)) * mw, y: y0 + (r / (PALM_ROWS - 1)) * mh });
+  const tris = [];
+  for (let r = 0; r < PALM_ROWS - 1; r++)
+    for (let c = 0; c < PALM_COLS - 1; c++) {
+      const tl = r * PALM_COLS + c, tr = tl + 1, bl = tl + PALM_COLS, br = bl + 1;
+      tris.push([tl, tr, bl], [tr, br, bl]);
+    }
+  return { restVerts, tris, pathMap: buildPathMap(path.commands, offX, offY, restVerts, tris), w };
+}
+
+// Local vertex positions for crumple amount c (0 = flat, 1 = balled up). Wrinkles from
+// earlier squeezes stay in the sheet.
+function palmShape(word, wrinkle, c, seed) {
+  const k = PALM_REF_FS * 0.7, amp = PALM_REF_FS * 1.1 * Math.pow(c, 0.8);
+  return word.restVerts.map((v, i) => {
+    const f = foldField(v.x / k, v.y / k, seed);
+    const bx = v.x + wrinkle[i].x, by = v.y + wrinkle[i].y;
+    return { x: bx * (1 - 0.85 * c) + f.x * amp, y: by * (1 - 0.85 * c) + f.y * amp };
+  });
+}
+
+// Fingers only (no palm, no forearm): used to cut the closing fingers out of the word
+const FINGER_BONES = HAND_CONNECTIONS.filter(([a, b]) => !(
+  (a === 0 && (b === 1 || b === 5 || b === 17)) || (a === 5 && b === 9) || (a === 9 && b === 13) || (a === 13 && b === 17)));
+function paintFingers(ctx, hands) {
+  ctx.lineCap = 'round';
+  for (const h of hands) {
+    const { size } = handMetrics(h);
+    ctx.lineWidth = size * 0.24;
+    ctx.beginPath();
+    for (const [a, b] of FINGER_BONES) { ctx.moveTo(h[a].x, h[a].y); ctx.lineTo(h[b].x, h[b].y); }
+    ctx.stroke();
+  }
+}
 const TRACE_MIN_DIST = 4; // min px between trail points
 const TRACE_PINCH_CLOSE = 40; // px — thumb+index touching
 const TRACE_PINCH_OPEN = 70;  // px — thumb+index separated
@@ -309,6 +362,7 @@ export default function FingerDrawApp() {
   const meshRef = useRef(null);   // mesh mode data
   const latestHandsRef = useRef(null); // last detected hands, container CSS coords
   const deskRef = useRef(null); // desk mode: letter bodies + hand colliders
+  const palmRef = useRef(null); // palm mode: word mesh + crumple state
   const handFiltersRef = useRef({}); // per-hand (Left/Right) One Euro filters for the 21 landmarks
   const underHandsRef = useRef(true);
   const grainCanvasRef = useRef(null); // grain texture for compositing
@@ -918,6 +972,56 @@ export default function FingerDrawApp() {
     }
   }, []);
 
+  // ---- Palm mode ----
+  const initPalm = useCallback(() => {
+    const font = otFontRef.current;
+    if (!font) return;
+    const text = (inputTextRef.current.split('\n').map(t => t.trim()).find(Boolean)) || 'FORCE';
+    const word = buildPalmWord(font, text);
+    if (!word) { palmRef.current = null; return; }
+    palmRef.current = {
+      word, visible: false, c: 0, target: 0, maxC: 0, seed: 1, lastSeen: 0, T: null,
+      wrinkle: word.restVerts.map(() => ({ x: 0, y: 0 })),
+    };
+  }, []);
+
+  // Called on every hand-detection frame
+  const updatePalm = useCallback((pr, hands, now) => {
+    if (!hands?.length) {
+      if (pr.visible && now - pr.lastSeen > PALM_LOST_MS) {
+        // hand gone: next open palm gets a fresh, flat word
+        Object.assign(pr, { visible: false, c: 0, target: 0, maxC: 0, T: null,
+          wrinkle: pr.word.restVerts.map(() => ({ x: 0, y: 0 })) });
+      }
+      return;
+    }
+    // use the biggest (nearest) hand
+    const ms = hands.map(handMetrics);
+    let hi = 0;
+    for (let i = 1; i < ms.length; i++) if (ms[i].size > ms[hi].size) hi = i;
+    const h = hands[hi], m = ms[hi];
+    pr.lastSeen = now;
+    if (!pr.visible) {
+      if (m.open < PALM_SHOW) return; // wait for an open palm
+      pr.visible = true;
+    }
+    pr.target = Math.max(0, Math.min(1, (PALM_SHOW - m.open) / (PALM_SHOW - PALM_FIST)));
+    pr.T = {
+      cx: m.cx, cy: m.cy,
+      angle: Math.atan2(h[9].y - h[0].y, h[9].x - h[0].x) + Math.PI / 2, // fingers up = upright
+      s: (m.size * PALM_WORD_W) / pr.word.w,
+    };
+  }, []);
+
+  // World-space mesh vertices for the current palm state (or null when hidden)
+  const palmVerts = (pr) => {
+    if (!pr?.visible || !pr.T || pr.c > 0.88) return null;
+    const { cx, cy, angle, s } = pr.T, ca = Math.cos(angle), sa = Math.sin(angle);
+    return palmShape(pr.word, pr.wrinkle, pr.c, pr.seed)
+      .map(p => ({ position: { x: cx + (p.x * ca - p.y * sa) * s, y: cy + (p.x * sa + p.y * ca) * s } }));
+  };
+  const palmVertsRef = useRef(palmVerts);
+
   // Two-palm squeeze state machine (called on every hand-detection frame)
   const updateSqueeze = useCallback((m, metrics, now) => {
     const fsz = fontSizeRef.current;
@@ -990,6 +1094,20 @@ export default function FingerDrawApp() {
       }
 
       if ((mode === 'fall' || mode === 'mesh') && engineRef.current) Engine.update(engineRef.current, dt);
+      if (mode === 'palm' && palmRef.current?.visible) {
+        const pr = palmRef.current;
+        pr.c += (pr.target - pr.c) * Math.min(1, dt / 90);
+        pr.maxC = Math.max(pr.maxC, pr.c);
+        if (pr.maxC > 0.8 && pr.c < 0.25) {
+          // opened after crushing it: the paper keeps the folds
+          const k = PALM_REF_FS * 0.7, amp = PALM_REF_FS * 0.4;
+          pr.wrinkle = pr.wrinkle.map((w, i) => {
+            const v = pr.word.restVerts[i], f = foldField(v.x / k, v.y / k, pr.seed + 17);
+            return { x: w.x + f.x * amp, y: w.y + f.y * amp };
+          });
+          pr.seed += 1; pr.maxC = 0;
+        }
+      }
       if (mode === 'desk' && engineRef.current && deskRef.current) {
         // move hand colliders in small steps between detections so fast sweeps don't skip letters
         const d = deskRef.current;
@@ -1050,7 +1168,7 @@ export default function FingerDrawApp() {
         {
           // Hand detection (trace / mesh / desk). Runs whether or not a body pose was
           // found, so hands seen from above over a desk are still tracked.
-          if ((mode === 'trace' || mode === 'mesh' || mode === 'desk') && handLandmarkerRef.current) {
+          if ((mode === 'trace' || mode === 'mesh' || mode === 'desk' || mode === 'palm') && handLandmarkerRef.current) {
             const handRes = handLandmarkerRef.current.detectForVideo(video, now);
             const numHands = handRes.landmarks?.length || 0;
 
@@ -1116,6 +1234,7 @@ export default function FingerDrawApp() {
                 updateSqueeze(meshRef.current, metrics, now);
               }
               if (mode === 'desk' && deskRef.current) updateDeskHands(deskRef.current, latestHandsRef.current);
+              if (mode === 'palm' && palmRef.current) updatePalm(palmRef.current, latestHandsRef.current, now);
               if (mode === 'mesh' && meshRef.current) {
                 const m = meshRef.current;
                 const activeHands = new Set();
@@ -1164,6 +1283,7 @@ export default function FingerDrawApp() {
               latestHandsRef.current = null;
               if (mode === 'mesh' && meshRef.current) updateSqueeze(meshRef.current, [], now);
               if (mode === 'desk' && deskRef.current) updateDeskHands(deskRef.current, []);
+              if (mode === 'palm' && palmRef.current) updatePalm(palmRef.current, [], now);
               // Release all grabs if no hands detected
               if (mode === 'mesh' && meshRef.current?.grabs) {
                 for (const g of Object.values(meshRef.current.grabs)) {
@@ -1349,6 +1469,24 @@ export default function FingerDrawApp() {
           }
           ctx.fillStyle = color;
           ctx.fill();
+        } else if (mode === 'palm' && palmRef.current) {
+          const verts = palmVertsRef.current(palmRef.current);
+          if (verts) {
+            const { pathMap, tris } = palmRef.current.word;
+            ctx.beginPath();
+            for (const cmd of pathMap) {
+              const dp = cmd.pts.map(p => deformPt(p, tris, verts));
+              switch (cmd.type) {
+                case 'M': if (dp[0]) ctx.moveTo(dp[0].x, dp[0].y); break;
+                case 'L': if (dp[0]) ctx.lineTo(dp[0].x, dp[0].y); break;
+                case 'Q': if (dp[0] && dp[1]) ctx.quadraticCurveTo(dp[0].x, dp[0].y, dp[1].x, dp[1].y); break;
+                case 'C': if (dp[0] && dp[1] && dp[2]) ctx.bezierCurveTo(dp[0].x, dp[0].y, dp[1].x, dp[1].y, dp[2].x, dp[2].y); break;
+                case 'Z': ctx.closePath(); break;
+              }
+            }
+            ctx.fillStyle = COLOR_PALETTE[charColorRef.current];
+            ctx.fill();
+          }
         } else if (mode === 'desk' && deskRef.current) {
           ctx.fillStyle = COLOR_PALETTE[charColorRef.current];
           for (const l of deskRef.current.letters) {
@@ -1363,16 +1501,17 @@ export default function FingerDrawApp() {
 
         // Text passes under the hands: cut the hand silhouettes out of the type layer
         const handsNow = latestHandsRef.current;
-        if ((mode === 'mesh' || mode === 'desk') && handsNow && underHandsRef.current) {
+        if ((mode === 'mesh' || mode === 'desk' || mode === 'palm') && handsNow && underHandsRef.current) {
           ctx.save();
           ctx.globalCompositeOperation = 'destination-out';
           ctx.fillStyle = '#000'; ctx.strokeStyle = '#000';
-          paintHandSilhouettes(ctx, handsNow);
+          // palm mode: the word lies on the palm, so only the closing fingers cover it
+          if (mode === 'palm') paintFingers(ctx, handsNow); else paintHandSilhouettes(ctx, handsNow);
           ctx.restore();
         }
 
         // Faint skeleton for every detected hand (only when not cutting the hands out)
-        if ((mode === 'mesh' || mode === 'desk') && handsNow && !underHandsRef.current) {
+        if ((mode === 'mesh' || mode === 'desk' || mode === 'palm') && handsNow && !underHandsRef.current) {
           ctx.save();
           ctx.strokeStyle = 'rgba(255,255,255,0.35)';
           ctx.lineWidth = 1;
@@ -1408,7 +1547,7 @@ export default function FingerDrawApp() {
 
     animFrameRef.current = requestAnimationFrame(loop);
     return () => { if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current); };
-  }, [modelLoading, updateBodyFromPose, hideBody, landmarkToCss, updateSqueeze, updateDeskHands]);
+  }, [modelLoading, updateBodyFromPose, hideBody, landmarkToCss, updateSqueeze, updateDeskHands, updatePalm]);
 
   // Toggle camera facing mode
   const toggleCamera = useCallback(() => {
@@ -1535,11 +1674,14 @@ export default function FingerDrawApp() {
   useEffect(() => { initMeshRef.current = initMesh; }, [initMesh]);
   const initDeskRef = useRef(null);
   useEffect(() => { initDeskRef.current = initDesk; }, [initDesk]);
+  const initPalmRef = useRef(null);
+  useEffect(() => { initPalmRef.current = initPalm; }, [initPalm]);
 
   // Rebuild the mesh when text or type settings change (debounced)
   useEffect(() => {
-    if (displayModeRef.current !== 'mesh' && displayModeRef.current !== 'desk') return;
-    const id = setTimeout(() => (displayModeRef.current === 'desk' ? initDeskRef.current?.() : initMeshRef.current?.()), 250);
+    const md = displayModeRef.current;
+    if (md !== 'mesh' && md !== 'desk' && md !== 'palm') return;
+    const id = setTimeout(() => (md === 'desk' ? initDeskRef.current?.() : md === 'palm' ? initPalmRef.current?.() : initMeshRef.current?.()), 250);
     return () => clearTimeout(id);
   }, [inputText, fontSize, tracking, leading]);
 
@@ -1548,9 +1690,11 @@ export default function FingerDrawApp() {
   const exportSvg = useCallback(() => {
     const m = displayModeRef.current === 'mesh' ? meshRef.current : null;
     const desk = displayModeRef.current === 'desk' ? deskRef.current : null;
+    const palm = displayModeRef.current === 'palm' ? palmRef.current : null;
+    const palmV = palm ? palmVertsRef.current(palm) : null;
     const video = videoRef.current;
     const container = cameraWrapRef.current;
-    if ((!m && !desk) || !video || !video.videoWidth || !container) return;
+    if ((!m && !desk && !palmV) || !video || !video.videoWidth || !container) return;
     const { width: cw, height: ch } = container.getBoundingClientRect();
     const vidW = video.videoWidth, vidH = video.videoHeight;
     let dw, dh, ox, oy;
@@ -1566,8 +1710,10 @@ export default function FingerDrawApp() {
         d += cmdsToSvgPath(l.cmds, (x, y) => toV({ x: bp.x + x * ca - y * sa, y: bp.y + x * sa + y * ca }));
       }
     }
-    if (m) for (const cmd of m.pathMap) {
-      const pts = cmd.pts.map(p => toV(deformPt(p, m.tris, m.bodies)));
+    const src = m ? { pathMap: m.pathMap, tris: m.tris, verts: m.bodies }
+      : palmV ? { pathMap: palm.word.pathMap, tris: palm.word.tris, verts: palmV } : null;
+    if (src) for (const cmd of src.pathMap) {
+      const pts = cmd.pts.map(p => toV(deformPt(p, src.tris, src.verts)));
       switch (cmd.type) {
         case 'M': d += `M${f(pts[0][0])} ${f(pts[0][1])}`; break;
         case 'L': d += `L${f(pts[0][0])} ${f(pts[0][1])}`; break;
@@ -1593,13 +1739,13 @@ export default function FingerDrawApp() {
     const t = video.currentTime;
     const color = COLOR_PALETTE[charColorRef.current];
     const svg = `<?xml version="1.0" encoding="UTF-8"?>
-<!-- they-live ${desk ? 'desk' : 'mesh'} export | source: ${isVideo ? 'video file' : 'camera'} ${vidW}x${vidH}${isVideo ? ` | time: ${t.toFixed(3)}s` : ''} -->
+<!-- they-live ${displayModeRef.current} export | source: ${isVideo ? 'video file' : 'camera'} ${vidW}x${vidH}${isVideo ? ` | time: ${t.toFixed(3)}s` : ''} -->
 <svg xmlns="http://www.w3.org/2000/svg" width="${vidW}" height="${vidH}" viewBox="0 0 ${vidW} ${vidH}">
   <g id="type"><path d="${d}" fill="${color}"/></g>
   <g id="hand-guide" fill="none" stroke="#00E5FF" opacity="0.8">${guide}</g>
 </svg>
 `;
-    const name = isVideo ? `they-live-${desk ? 'desk' : 'mesh'}_t${t.toFixed(3)}s.svg` : `they-live-${desk ? 'desk' : 'mesh'}_${Date.now()}.svg`;
+    const name = isVideo ? `they-live-${displayModeRef.current}_t${t.toFixed(3)}s.svg` : `they-live-${displayModeRef.current}_${Date.now()}.svg`;
     downloadBlob(new Blob([svg], { type: 'image/svg+xml' }), name);
   }, []);
 
@@ -1624,7 +1770,7 @@ export default function FingerDrawApp() {
       if (prev === 'mesh') destroyMesh();
       if (prev === 'desk') destroyDesk();
 
-      const next = { fall: 'gaze', gaze: 'trace', trace: 'mesh', mesh: 'desk', desk: 'fall' }[prev];
+      const next = { fall: 'gaze', gaze: 'trace', trace: 'mesh', mesh: 'desk', desk: 'palm', palm: 'fall' }[prev];
       if (next === 'gaze') gazeDropIndexRef.current = 0;
       return next;
     });
@@ -1638,10 +1784,12 @@ export default function FingerDrawApp() {
     } else if (displayMode === 'desk') {
       if (engineRef.current) engineRef.current.gravity.y = 0; // seen from above: no gravity
       initDesk();
+    } else if (displayMode === 'palm') {
+      initPalm();
     } else if (engineRef.current) {
       engineRef.current.gravity.y = 1;
     }
-  }, [displayMode, initMesh, initDesk]);
+  }, [displayMode, initMesh, initDesk, initPalm]);
 
   // Composite video + grain + char canvas into a target-resolution context (center-cropped to target aspect)
   const drawCompositeFrame = useCallback((rctx, targetW, targetH) => {
@@ -1787,7 +1935,8 @@ export default function FingerDrawApp() {
     traceRef.current = { state: 'idle', points: [], cumDist: [0] };
     if (displayMode === 'mesh') { destroyMesh(); initMesh(); }
     if (displayMode === 'desk') initDesk();
-  }, [displayMode, destroyMesh, initMesh, initDesk]);
+    if (displayMode === 'palm') initPalm();
+  }, [displayMode, destroyMesh, initMesh, initDesk, initPalm]);
 
   return (
     <div className="finger-draw-app">
@@ -1878,12 +2027,12 @@ export default function FingerDrawApp() {
               {videoPaused ? '▶' : '❚❚'}
             </button>
           )}
-          {(displayMode === 'mesh' || displayMode === 'desk') && (
+          {(displayMode === 'mesh' || displayMode === 'desk' || displayMode === 'palm') && (
             <button onClick={() => setUnderHands(u => !u)} className={`fd-btn${underHands ? ' fd-btn-active' : ''}`}>
               UNDER
             </button>
           )}
-          {(displayMode === 'mesh' || displayMode === 'desk') && (
+          {(displayMode === 'mesh' || displayMode === 'desk' || displayMode === 'palm') && (
             <button onClick={exportSvg} className="fd-btn">SVG</button>
           )}
         </div>
