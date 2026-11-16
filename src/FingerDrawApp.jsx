@@ -307,8 +307,10 @@ const PALM_COLS = 14, PALM_ROWS = 8;
 function buildPalmWord(font, lines, track, lead) {
   const scale = PALM_REF_FS / font.unitsPerEm;
   const commands = [];
+  let w0 = 0; // widest line without tracking: the size on the palm is based on this
   lines.forEach((line, li) => {
     const glyphs = font.stringToGlyphs(line);
+    w0 = Math.max(w0, glyphs.reduce((a, g) => a + (g.advanceWidth || 0) * scale, 0));
     let x = 0;
     const y = li * PALM_REF_FS * lead;
     glyphs.forEach((g, i) => {
@@ -340,7 +342,7 @@ function buildPalmWord(font, lines, track, lead) {
       const tl = r * cols + c, tr = tl + 1, bl = tl + cols, br = bl + 1;
       tris.push([tl, tr, bl], [tr, br, bl]);
     }
-  return { restVerts, tris, pathMap: buildPathMap(commands, offX, offY, restVerts, tris), w, h };
+  return { restVerts, tris, pathMap: buildPathMap(commands, offX, offY, restVerts, tris), w, h, w0: w0 || w };
 }
 
 // Local vertex positions for crumple amount c (0 = flat, 1 = balled up). Wrinkles from
@@ -943,7 +945,7 @@ export default function FingerDrawApp() {
             }
             return o;
           });
-          const body = Bodies.circle(x + adv / 2, baseY - capH / 2, Math.max(fs * 0.06, Math.min(adv, capH) * DESK_LETTER_DISC), {
+          const body = Bodies.circle(x + adv / 2, baseY - capH / 2, Math.max(fs * 0.04, Math.min(adv, capH) * DESK_LETTER_DISC + Math.min(0, trk) / 2), {
             frictionAir: 0.14, friction: 0.4, restitution: 0, density: 0.002,
             collisionFilter: { category: DESK_LETTER, mask: DESK_LETTER_MASK },
           });
@@ -1060,7 +1062,7 @@ export default function FingerDrawApp() {
     pr.T = {
       cx: m.cx, cy: m.cy,
       angle: Math.atan2(h[9].y - h[0].y, h[9].x - h[0].x) + Math.PI / 2, // fingers up = upright
-      s: (m.size * pr.widthMul) / pr.word.w,
+      s: (m.size * pr.widthMul) / pr.word.w0,
     };
   }, []);
 
