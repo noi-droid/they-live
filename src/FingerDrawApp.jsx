@@ -122,7 +122,7 @@ function buildPathMap(commands, offX, offY, restVerts, tris) {
       }
       return { tri: -1, orig: pt }; // outside mesh fallback
     });
-    return { type: cmd.type, pts: mapped };
+    return { type: cmd.type, pts: mapped, g: cmd.g };
   });
 }
 
@@ -247,6 +247,32 @@ function paintHandSilhouettes(ctx, hands) {
   }
 }
 
+// Outline commands with points already in output space -> SVG path data, one string per letter.
+// Some fonts (e.g. CFF outlines read by opentype.js) never close their contours; canvas fills
+// close them silently, but an SVG would keep them open. Every contour is closed here, and a
+// final point that lands back on the start is dropped so the closing point is not doubled.
+function contoursToSvg(items) {
+  const f = n => n.toFixed(2), byLetter = new Map();
+  let cur = null, key = null;
+  const same = (a, b) => Math.abs(a[0] - b[0]) < 0.01 && Math.abs(a[1] - b[1]) < 0.01;
+  const flush = () => {
+    if (!cur || cur.length < 2) { cur = null; return; }
+    const start = cur[0].pts[0], last = cur[cur.length - 1];
+    if (last.type === 'L' && same(last.pts[0], start)) cur.pop();
+    let d = '';
+    for (const c of cur) d += c.type + c.pts.map(p => `${f(p[0])} ${f(p[1])}`).join(' ');
+    byLetter.set(key, (byLetter.get(key) || '') + d + 'Z');
+    cur = null;
+  };
+  for (const c of items) {
+    if (c.type === 'Z') { flush(); continue; }
+    if (c.type === 'M') { flush(); cur = [c]; key = c.g ?? 0; continue; }
+    if (!cur) continue;
+    cur.push(c);
+  }
+  flush();
+  return [...byLetter.values()];
+}
 function cmdsToSvgPath(cmds, tf) {
   let d = '';
   const f = n => n.toFixed(2);
@@ -308,13 +334,15 @@ function buildPalmWord(font, lines, track, lead) {
   const scale = PALM_REF_FS / font.unitsPerEm;
   const commands = [];
   let w0 = 0; // widest line without tracking: the size on the palm is based on this
+  let gi = 0;  // glyph index, so the SVG can give every letter its own path
   lines.forEach((line, li) => {
     const glyphs = font.stringToGlyphs(line);
     w0 = Math.max(w0, glyphs.reduce((a, g) => a + (g.advanceWidth || 0) * scale, 0));
     let x = 0;
     const y = li * PALM_REF_FS * lead;
     glyphs.forEach((g, i) => {
-      commands.push(...g.getPath(x, y, PALM_REF_FS).commands);
+      for (const c of g.getPath(x, y, PALM_REF_FS).commands) commands.push({ ...c, g: gi });
+      gi++;
       // tight tracking never eats the word space
       x += (g.advanceWidth || 0) * scale + (track < 0 && g.unicode === 32 ? -track : track);
       if (i < glyphs.length - 1) x += font.getKerningValue(g, glyphs[i + 1]) * scale;
@@ -1675,7 +1703,7 @@ export default function FingerDrawApp() {
 
     // Build combined path with tracking
     const combined = new OTPath();
-    let cy2 = 0;
+    let cy2 = 0, gi = 0;
     for (const line of lines) {
       let cx2 = 0;
       for (let wi = 0; wi < line.length; wi++) {
@@ -1683,7 +1711,8 @@ export default function FingerDrawApp() {
         for (const char of line[wi]) {
           const glyph = font.charToGlyph(char);
           const gp = glyph.getPath(cx2, cy2, fs);
-          for (const cmd of gp.commands) combined.commands.push(cmd);
+          for (const cmd of gp.commands) combined.commands.push({ ...cmd, g: gi });
+          gi++;
           cx2 += (glyph.advanceWidth || 0) * scale + trk;
         }
       }
@@ -1772,25 +1801,24 @@ export default function FingerDrawApp() {
     const toV = p => [((p.x - ox) / dw) * vidW, ((p.y - oy) / dh) * vidH];
     const f = n => n.toFixed(2);
 
-    let d = '';
+    const items = [];
     if (desk) {
-      for (const l of desk.letters) {
+      desk.letters.forEach((l, li) => {
         const { position: bp, angle } = l.body, ca = Math.cos(angle), sa = Math.sin(angle);
-        d += cmdsToSvgPath(l.cmds, (x, y) => toV({ x: bp.x + x * ca - y * sa, y: bp.y + x * sa + y * ca }));
-      }
+        const tf = (x, y) => toV({ x: bp.x + x * ca - y * sa, y: bp.y + x * sa + y * ca });
+        for (const c of l.cmds) {
+          if (c.type === 'Z') { items.push({ type: 'Z' }); continue; }
+          const pts = c.type === 'Q' ? [tf(c.x1, c.y1), tf(c.x, c.y)]
+            : c.type === 'C' ? [tf(c.x1, c.y1), tf(c.x2, c.y2), tf(c.x, c.y)] : [tf(c.x, c.y)];
+          items.push({ type: c.type, pts, g: li });
+        }
+      });
     }
     const src = m ? { pathMap: m.pathMap, tris: m.tris, verts: m.bodies }
       : palmV ? { pathMap: palm.word.pathMap, tris: palm.word.tris, verts: palmV } : null;
-    if (src) for (const cmd of src.pathMap) {
-      const pts = cmd.pts.map(p => toV(deformPt(p, src.tris, src.verts)));
-      switch (cmd.type) {
-        case 'M': d += `M${f(pts[0][0])} ${f(pts[0][1])}`; break;
-        case 'L': d += `L${f(pts[0][0])} ${f(pts[0][1])}`; break;
-        case 'Q': d += `Q${f(pts[0][0])} ${f(pts[0][1])} ${f(pts[1][0])} ${f(pts[1][1])}`; break;
-        case 'C': d += `C${f(pts[0][0])} ${f(pts[0][1])} ${f(pts[1][0])} ${f(pts[1][1])} ${f(pts[2][0])} ${f(pts[2][1])}`; break;
-        case 'Z': d += 'Z'; break;
-      }
-    }
+    if (src) for (const cmd of src.pathMap)
+      items.push({ type: cmd.type, g: cmd.g, pts: cmd.pts.map(p => toV(deformPt(p, src.tris, src.verts))) });
+    const letterPaths = contoursToSvg(items).map(d => `<path d="${d}"/>`).join('\n    ');
 
     let guide = '';
     const hands = latestHandsRef.current;
@@ -1810,7 +1838,9 @@ export default function FingerDrawApp() {
     const svg = `<?xml version="1.0" encoding="UTF-8"?>
 <!-- they-live ${displayModeRef.current} export | source: ${isVideo ? 'video file' : 'camera'} ${vidW}x${vidH}${isVideo ? ` | time: ${t.toFixed(3)}s` : ''} -->
 <svg xmlns="http://www.w3.org/2000/svg" width="${vidW}" height="${vidH}" viewBox="0 0 ${vidW} ${vidH}">
-  <g id="type"><path d="${d}" fill="${color}"/></g>
+  <g id="type" fill="${color}">
+    ${letterPaths}
+  </g>
   <g id="hand-guide" fill="none" stroke="#00E5FF" opacity="0.8">${guide}</g>
 </svg>
 `;
