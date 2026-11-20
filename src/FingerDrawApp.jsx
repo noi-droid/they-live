@@ -325,20 +325,33 @@ function pickPalmPreset(text) {
   return n <= 4 ? 'S' : n <= 14 ? 'M' : 'L';
 }
 const PALM_REF_FS = 100;   // reference size the word mesh is built at
+const PALM_SIZE_REF = 48;  // in PALM the size slider scales the word: 48px = the preset width on the palm
+const ALIGN_K = { left: 0, center: 0.5, right: 1 }; // how far a short line moves into the block's spare width
 const PALM_COLS = 14, PALM_ROWS = 8;
 
 // Text block outline + deformation mesh in local units, centred on (0, 0).
 // lines are set flush left; track is extra space per letter and lead the line height,
 // both at the reference size.
-function buildPalmWord(font, lines, track, lead) {
+function buildPalmWord(font, lines, track, lead, align = 'left') {
   const scale = PALM_REF_FS / font.unitsPerEm;
   const commands = [];
+  // line widths first, so short lines can be pushed right or centred
+  const lineW = lines.map(line => {
+    const gl = font.stringToGlyphs(line);
+    let x = 0;
+    gl.forEach((g, i) => {
+      x += (g.advanceWidth || 0) * scale;
+      if (i < gl.length - 1) x += (track < 0 && g.unicode === 32 ? -track : track) + font.getKerningValue(g, gl[i + 1]) * scale;
+    });
+    return x;
+  });
+  const blockW = Math.max(0, ...lineW), ak = ALIGN_K[align] ?? 0;
   let w0 = 0; // widest line without tracking: the size on the palm is based on this
   let gi = 0;  // glyph index, so the SVG can give every letter its own path
   lines.forEach((line, li) => {
     const glyphs = font.stringToGlyphs(line);
     w0 = Math.max(w0, glyphs.reduce((a, g) => a + (g.advanceWidth || 0) * scale, 0));
-    let x = 0;
+    let x = (blockW - lineW[li]) * ak;
     const y = li * PALM_REF_FS * lead;
     glyphs.forEach((g, i) => {
       for (const c of g.getPath(x, y, PALM_REF_FS).commands) commands.push({ ...c, g: gi });
@@ -473,6 +486,7 @@ export default function FingerDrawApp() {
   const [fontSize, setFontSize] = useState(48);
   const [tracking, setTracking] = useState(0);
   const [leading, setLeading] = useState(1.3);
+  const [align, setAlign] = useState('left'); // line alignment in MESH / DESK / PALM
   const [videoPaused, setVideoPaused] = useState(false);
   const [underHands, setUnderHands] = useState(true);
   const [facingMode, setFacingMode] = useState('user');
@@ -488,6 +502,7 @@ export default function FingerDrawApp() {
   const fontSizeRef = useRef(48);
   const trackingRef = useRef(0);
   const leadingRef = useRef(1.3);
+  const alignRef = useRef('left');
   const facingModeRef = useRef('user');
   const sourceModeRef = useRef('camera');
   const displayModeRef = useRef('fall');
@@ -501,6 +516,7 @@ export default function FingerDrawApp() {
   useEffect(() => { fontSizeRef.current = fontSize; }, [fontSize]);
   useEffect(() => { trackingRef.current = tracking; }, [tracking]);
   useEffect(() => { leadingRef.current = leading; }, [leading]);
+  useEffect(() => { alignRef.current = align; }, [align]);
   useEffect(() => { underHandsRef.current = underHands; }, [underHands]);
   useEffect(() => { facingModeRef.current = facingMode; }, [facingMode]);
   useEffect(() => { sourceModeRef.current = sourceMode; }, [sourceMode]);
@@ -959,8 +975,9 @@ export default function FingerDrawApp() {
     const x0 = (cw - blockW) / 2;
     let baseY = ch / 2 - (lines.length - 1) * lineH / 2 + capH / 2;
     const letters = [];
+    const ak = ALIGN_K[alignRef.current] ?? 0;
     for (const line of lines) {
-      let x = x0;
+      let x = x0 + (blockW - line.w) * ak;
       line.words.forEach((w, wi) => {
         if (wi) x += spaceW;
         for (const c of w) {
@@ -1059,7 +1076,7 @@ export default function FingerDrawApp() {
     const key = pickPalmPreset(lines.join(''));
     // tracking slider is in px at the current font size; convert to the reference size
     const track = trackingRef.current * (PALM_REF_FS / fontSizeRef.current);
-    const word = buildPalmWord(font, lines, track, leadingRef.current);
+    const word = buildPalmWord(font, lines, track, leadingRef.current, alignRef.current);
     if (!word) { palmRef.current = null; return; }
     palmRef.current = {
       word, widthMul: PALM_PRESETS[key].w, presetKey: key, visible: false, c: 0, target: 0, maxC: 0, seed: 1, lastSeen: 0, T: null,
@@ -1091,7 +1108,7 @@ export default function FingerDrawApp() {
     pr.T = {
       cx: m.cx, cy: m.cy,
       angle: Math.atan2(h[9].y - h[0].y, h[9].x - h[0].x) + Math.PI / 2, // fingers up = upright
-      s: (m.size * pr.widthMul) / pr.word.w0,
+      s: (m.size * pr.widthMul) / pr.word.w0 * (fontSizeRef.current / PALM_SIZE_REF),
     };
   }, []);
 
@@ -1701,11 +1718,17 @@ export default function FingerDrawApp() {
       if (curLine.length > 0) lines.push(curLine);
     }
 
-    // Build combined path with tracking
+    // Build combined path with tracking (short lines moved by the alignment)
+    const lineWidth = line => line.reduce((a, word, wi) => {
+      let ww = -trk;
+      for (const ch2 of word) ww += (font.charToGlyph(ch2).advanceWidth || 0) * scale + trk;
+      return a + ww + (wi ? spaceW : 0);
+    }, 0);
+    const lws = lines.map(lineWidth), blockW = Math.max(0, ...lws), ak = ALIGN_K[alignRef.current] ?? 0;
     const combined = new OTPath();
     let cy2 = 0, gi = 0;
-    for (const line of lines) {
-      let cx2 = 0;
+    for (const [li, line] of lines.entries()) {
+      let cx2 = (blockW - lws[li]) * ak;
       for (let wi = 0; wi < line.length; wi++) {
         if (wi > 0) cx2 += spaceW;
         for (const char of line[wi]) {
@@ -1780,7 +1803,7 @@ export default function FingerDrawApp() {
     if (md !== 'mesh' && md !== 'desk' && md !== 'palm') return;
     const id = setTimeout(() => (md === 'desk' ? initDeskRef.current?.() : md === 'palm' ? initPalmRef.current?.() : initMeshRef.current?.()), 250);
     return () => clearTimeout(id);
-  }, [inputText, fontSize, tracking, leading]);
+  }, [inputText, fontSize, tracking, leading, align]);
 
 
   // Export the deformed mesh text as SVG, in the source video's own pixel space
@@ -2070,7 +2093,7 @@ export default function FingerDrawApp() {
         <div className="fd-toolbar">
           <div className="fd-sliders">
             <div className="fd-size-control">
-              <span className="fd-size-label">{fontSize}px</span>
+              <span className="fd-size-label">{displayMode === 'palm' ? `×${(fontSize / PALM_SIZE_REF).toFixed(2)}` : `${fontSize}px`}</span>
               <input type="range" className="fd-size-slider" min="24" max="400"
                 value={fontSize} onChange={e => setFontSize(Number(e.target.value))} />
             </div>
@@ -2132,6 +2155,11 @@ export default function FingerDrawApp() {
               {k}
             </button>
           ))}
+          {(displayMode === 'mesh' || displayMode === 'desk' || displayMode === 'palm') && (
+            <button onClick={() => setAlign(a => (a === 'left' ? 'center' : a === 'center' ? 'right' : 'left'))} className="fd-btn">
+              {align === 'left' ? 'ALIGN ←' : align === 'center' ? 'ALIGN ↔' : 'ALIGN →'}
+            </button>
+          )}
           {(displayMode === 'mesh' || displayMode === 'desk' || displayMode === 'palm') && (
             <button onClick={() => setUnderHands(u => !u)} className={`fd-btn${underHands ? ' fd-btn-active' : ''}`}>
               UNDER
